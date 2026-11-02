@@ -39,6 +39,11 @@ paths:
   logs: outputs/logs
   results: results
 
+explainability:
+  grad_cam_target_layers:
+    efficientnet_b0: features.8.0
+    xception: features.9.main.2.block.3
+
 robustness:
   jpeg_qualities: [95, 75, 50]
   gaussian_noise_stds: [0.01, 0.03, 0.05]

@@ -10,6 +10,7 @@ from src.evaluation.robustness import (
     RobustnessConfig,
     evaluate_checkpoint,
     load_manifest_samples,
+    validate_samples,
     transformation_specs,
 )
 from src.models.classifiers import create_model
@@ -47,6 +48,9 @@ def main() -> None:
         image_column=task_cfg.get("image_column", task_cfg.get("frame_column", "filepath")),
         label_column=task_cfg["label_column"],
     )
+    valid_samples, invalid_samples = validate_samples(samples)
+    if not valid_samples:
+        raise ValueError("Robustness evaluation found no valid images in the test manifest.")
     device = get_runtime_device(config["runtime"]["device"], config["runtime"]["mixed_precision"]).device
     model_results = {}
     for name, checkpoint in (
@@ -57,10 +61,12 @@ def main() -> None:
         model_results[name] = evaluate_checkpoint(
             model,
             checkpoint,
-            samples,
+            valid_samples,
             image_size=config["training"]["image_size"],
             config=corruption,
             device=device,
+            invalid_samples=invalid_samples,
+            requested_sample_count=len(samples),
         )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -68,7 +74,11 @@ def main() -> None:
         json.dumps(
             {
                 "dataset_manifest": task_cfg["test_csv"],
-                "sample_count": len(samples),
+                "sample_count": len(valid_samples),
+                "requested_sample_count": len(samples),
+                "valid_sample_count": len(valid_samples),
+                "invalid_sample_count": len(invalid_samples),
+                "invalid_samples": invalid_samples,
                 "seed": corruption.seed,
                 "transformations": transformation_specs(corruption),
                 "models": model_results,

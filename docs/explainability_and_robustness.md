@@ -18,10 +18,12 @@ python scripts/generate_gradcam.py \
 ```
 
 Use `--image path/to/image.jpg` one or more times for selected inputs. The
-script automatically selects the last convolution in `features` for both
-architectures. `--target-layer features.8.0` (or another valid dotted module
-path) can override selection; `--target-class 0` or `--target-class 1` can
-request real or fake attribution explicitly. Invalid images are recorded in
+script uses the architecture-specific target layer in `configs/config.yaml`:
+`features.8.0` for EfficientNet-B0 and
+`features.9.main.2.block.3` for this repository's XceptionNet.
+`--target-layer` (a valid dotted module path) can override selection;
+`--target-class 0` or `--target-class 1` can request real or fake attribution
+explicitly. Invalid images are recorded in
 `results/explainability/metadata.json`; a missing checkpoint is a hard error.
 Overlays are saved as PNG files and include the predicted real/fake class and
 fake probability in the metadata.
@@ -39,11 +41,15 @@ python scripts/evaluate_robustness.py \
 ```
 
 The report includes a clean baseline and deterministic JPEG compression,
-Gaussian noise, Gaussian blur, and downscale-then-resize conditions. Each
-condition records its parameter, evaluated sample count, skipped sample count,
-accuracy, precision, recall, F1-score, ROC-AUC when defined, and a 2x2
-confusion matrix. Noise uses `runtime.seed` plus the ordered sample index.
-Settings are in `configs/config.yaml` under `robustness`.
+Gaussian noise, Gaussian blur, and downscale-then-resize conditions. The test
+manifest is validated once before evaluation, so clean and every corruption
+use the same ordered valid paths and labels. The report records requested,
+valid, and invalid counts plus invalid paths; each condition records its
+parameter, sample count, accuracy, precision, recall, F1-score, ROC-AUC when
+defined, and a 2x2 confusion matrix. Noise uses `runtime.seed` plus the
+ordered sample index. Settings are read from `configs/config.yaml` under
+`robustness`; `configs/experiments.yaml` records that source rather than
+duplicating the values.
 
 ## Kaggle GPU validation
 

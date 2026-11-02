@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -25,8 +26,15 @@ def find_target_layer(model: Any, requested: str | None = None) -> tuple[Any, st
             layer = _module_from_path(model, requested)
             if isinstance(layer, nn.Conv2d):
                 return layer, requested
-        except (AttributeError, IndexError, TypeError, ValueError):
-            pass
+            reason = "it is not a Conv2d layer"
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            reason = f"it does not exist ({exc})"
+        warnings.warn(
+            f"Invalid Grad-CAM target layer {requested!r}; falling back to the last "
+            f"spatial convolution ({reason}).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     candidates = [
         (name, module)
         for name, module in model.named_modules()
@@ -44,6 +52,7 @@ class GradCAM:
         self.model = model
         self.activations: Any = None
         self.gradients: Any = None
+        self._closed = False
         self._forward_handle = target_layer.register_forward_hook(self._save_activation)
         self._backward_handle = target_layer.register_full_backward_hook(self._save_gradient)
 
@@ -54,8 +63,10 @@ class GradCAM:
         self.gradients = output[0]
 
     def close(self) -> None:
-        self._forward_handle.remove()
-        self._backward_handle.remove()
+        if not self._closed:
+            self._forward_handle.remove()
+            self._backward_handle.remove()
+            self._closed = True
 
     def __enter__(self) -> "GradCAM":
         return self
@@ -66,20 +77,38 @@ class GradCAM:
     def __call__(self, image_tensor: Any, target_class: int) -> tuple[Any, float]:
         import torch
 
-        self.model.zero_grad(set_to_none=True)
-        logits = self.model(image_tensor).reshape(-1)
-        logit = logits[0]
-        score = logit if target_class == 1 else -logit
-        score.backward()
-        if self.activations is None or self.gradients is None:
-            raise RuntimeError("Grad-CAM hooks did not capture activations and gradients.")
-        weights = self.gradients.mean(dim=(2, 3), keepdim=True)
-        cam = torch.relu((weights * self.activations).sum(dim=1, keepdim=False))[0]
-        cam = cam - cam.min()
-        maximum = cam.max()
-        if float(maximum) > 0:
-            cam = cam / maximum
-        return cam.detach().cpu(), float(torch.sigmoid(logit.detach()))
+        if target_class not in (0, 1):
+            raise ValueError(f"target_class must be 0 or 1, got {target_class!r}")
+        try:
+            self.model.zero_grad(set_to_none=True)
+            logits = self.model(image_tensor).reshape(-1)
+            if logits.numel() == 0:
+                raise RuntimeError("Model produced no logits for Grad-CAM.")
+            logit = logits[0]
+            score = logit if target_class == 1 else -logit
+            score.backward()
+            if self.activations is None or self.gradients is None:
+                raise RuntimeError("Grad-CAM hooks did not capture activations and gradients.")
+            if self.activations.ndim != 4 or self.gradients.ndim != 4:
+                raise ValueError("Grad-CAM target layer must produce spatial feature maps.")
+            if self.activations.shape[-2:] != self.gradients.shape[-2:]:
+                raise RuntimeError("Grad-CAM activation and gradient spatial shapes differ.")
+            if not torch.isfinite(self.activations).all() or not torch.isfinite(self.gradients).all():
+                raise RuntimeError("Grad-CAM activations or gradients contain non-finite values.")
+            weights = self.gradients.mean(dim=(2, 3), keepdim=True)
+            cam = torch.relu((weights * self.activations).sum(dim=1))[0]
+            if not torch.isfinite(cam).all():
+                raise RuntimeError("Grad-CAM heatmap contains non-finite values.")
+            cam = cam - cam.min()
+            maximum = cam.max()
+            if not torch.isfinite(maximum):
+                raise RuntimeError("Grad-CAM heatmap maximum is non-finite.")
+            if float(maximum) > 0:
+                cam = cam / maximum
+            cam = torch.nan_to_num(cam, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            return cam.detach().cpu(), float(torch.sigmoid(logit.detach()))
+        finally:
+            self.close()
 
 
 def _overlay(image: Image.Image, cam: Any) -> Image.Image:
@@ -119,6 +148,8 @@ def generate_gradcam(
         probability = float(torch.sigmoid(model(tensor).reshape(-1)[0]).cpu())
     predicted_class = int(probability >= 0.5)
     selected_class = predicted_class if target_class is None else target_class
+    if selected_class not in (0, 1):
+        raise ValueError(f"target_class must be 0 or 1, got {selected_class!r}")
     with GradCAM(model, layer) as cam:
         with torch.enable_grad():
             heatmap, _ = cam(tensor, selected_class)

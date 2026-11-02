@@ -28,6 +28,7 @@ def main() -> None:
 
     config = load_yaml_config(args.config)
     runtime, training, model_cfg = config["runtime"], config["training"], config["model"]
+    target_layers = config.get("explainability", {}).get("grad_cam_target_layers", {})
     dataset_cfg = load_yaml_config("configs/dataset.yaml")["dataset"]
     task_cfg = dataset_cfg[dataset_cfg.get("task", "image_detection")]
     checkpoint = Path(args.checkpoint)
@@ -58,7 +59,7 @@ def main() -> None:
                     image_path,
                     destination,
                     image_size=training["image_size"],
-                    target_layer=args.target_layer,
+                    target_layer=args.target_layer or target_layers.get(model_cfg["name"]),
                     device=device,
                     target_class=args.target_class,
                 )

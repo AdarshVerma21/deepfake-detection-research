@@ -6,7 +6,7 @@ import csv
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -41,14 +41,49 @@ def load_manifest_samples(
     label_column: str = "label",
 ) -> list[tuple[Path, int]]:
     manifest = Path(manifest_path)
+    if not manifest.is_file():
+        raise FileNotFoundError(f"Test manifest not found: {manifest}")
     base = Path(root) if root is not None else manifest.parent
     with manifest.open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    if not rows:
+        raise ValueError(f"Manifest contains no samples for split={split!r}: {manifest}")
+    required = {image_column, label_column}
+    missing = required.difference(rows[0])
+    if missing:
+        raise ValueError(f"Manifest is missing required columns {sorted(missing)}: {manifest}")
     if split and rows and "split" in rows[0]:
         rows = [row for row in rows if row.get("split") == split]
     if not rows:
         raise ValueError(f"Manifest contains no samples for split={split!r}: {manifest}")
-    return [(base / row[image_column], int(row[label_column])) for row in rows]
+    samples: list[tuple[Path, int]] = []
+    for row_number, row in enumerate(rows, start=2):
+        try:
+            label = int(row[label_column])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid label on manifest row {row_number}: {manifest}") from exc
+        if label not in (0, 1):
+            raise ValueError(f"Labels must be 0 or 1 on manifest row {row_number}: {manifest}")
+        filepath = row.get(image_column, "").strip()
+        if not filepath:
+            raise ValueError(f"Empty image path on manifest row {row_number}: {manifest}")
+        samples.append((base / filepath, label))
+    return samples
+
+
+def validate_samples(
+    samples: Iterable[tuple[Path, int]],
+) -> tuple[list[tuple[Path, int, Image.Image]], list[dict[str, str | int]]]:
+    """Read each sample once and return a fixed valid population plus invalid records."""
+    valid: list[tuple[Path, int, Image.Image]] = []
+    invalid: list[dict[str, str | int]] = []
+    for path, label in samples:
+        try:
+            with Image.open(path) as opened:
+                valid.append((path, label, opened.convert("RGB")))
+        except (OSError, ValueError) as exc:
+            invalid.append({"path": str(path), "label": label, "error": str(exc)})
+    return valid, invalid
 
 
 def apply_jpeg_compression(image: Image.Image, quality: int) -> Image.Image:
@@ -109,10 +144,12 @@ def apply_transformation(
 def evaluate_checkpoint(
     model: Any,
     checkpoint_path: str | Path,
-    samples: list[tuple[Path, int]],
+    samples: list[tuple[Path, int]] | list[tuple[Path, int, Image.Image]],
     image_size: int,
     config: RobustnessConfig,
     device: Any = "cpu",
+    invalid_samples: list[dict[str, str | int]] | None = None,
+    requested_sample_count: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate every corruption with the same ordered sample list."""
     import torch
@@ -122,31 +159,43 @@ def evaluate_checkpoint(
     checkpoint = Path(checkpoint_path)
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Trained checkpoint not found: {checkpoint}")
+    requested_count = len(samples) if requested_sample_count is None else requested_sample_count
+    if requested_count == 0:
+        raise ValueError("Robustness evaluation requires at least one requested sample.")
+    if samples and len(samples[0]) == 3:
+        valid_samples = [
+            (path, label, image)
+            for path, label, image in samples
+        ]
+        invalid_records = invalid_samples or []
+    else:
+        valid_samples, invalid_records = validate_samples(
+            [(path, label) for path, label in samples]
+        )
+    if not valid_samples:
+        raise ValueError("Robustness evaluation found no valid images in the manifest.")
     load_checkpoint(checkpoint, model, device=device)
     model.to(device).eval()
     preprocess = build_transforms(image_size)
     results: dict[str, Any] = {
         "checkpoint": str(checkpoint),
-        "sample_count": len(samples),
+        "sample_count": len(valid_samples),
+        "requested_sample_count": requested_count,
+        "valid_sample_count": len(valid_samples),
+        "invalid_sample_count": len(invalid_records),
+        "invalid_samples": invalid_records,
         "transformations": {},
     }
     for spec in transformation_specs(config):
         labels: list[int] = []
         probabilities: list[float] = []
-        skipped = 0
-        for index, (path, label) in enumerate(samples):
-            try:
-                with Image.open(path) as opened:
-                    image = opened.convert("RGB")
-                transformed = apply_transformation(image, spec["name"], spec["parameter"], config.seed + index)
-                tensor = preprocess(transformed).unsqueeze(0).to(device)
-            except (OSError, ValueError) as exc:
-                skipped += 1
-                continue
+        for index, (_path, label, image) in enumerate(valid_samples):
+            transformed = apply_transformation(image, spec["name"], spec["parameter"], config.seed + index)
+            tensor = preprocess(transformed).unsqueeze(0).to(device)
             with torch.inference_mode():
                 probabilities.append(float(torch.sigmoid(model(tensor).reshape(-1)[0]).cpu()))
             labels.append(label)
-        metric_result = calculate_metrics(labels, probabilities) if labels else {"sample_count": 0}
-        metric_result.update({"parameter": spec["parameter"], "sample_count": len(labels), "skipped_count": skipped})
+        metric_result = calculate_metrics(labels, probabilities)
+        metric_result.update({"parameter": spec["parameter"], "sample_count": len(labels)})
         results["transformations"][spec["name"] if spec["parameter"] is None else f"{spec['name']}_{spec['parameter']}"] = metric_result
     return results

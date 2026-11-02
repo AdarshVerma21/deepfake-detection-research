@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
-import cv2
-import numpy as np
+import pytest
+
+cv2 = pytest.importorskip("cv2")
+np = pytest.importorskip("numpy")
 
 from src.data.faceforensics import (
     FaceForensicsPipeline,

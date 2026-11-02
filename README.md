@@ -124,6 +124,31 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+## Validation commands
+
+Use targeted commands instead of installing full training dependencies in minimal
+environments:
+
+```bash
+# Lightweight tests (no torch / torchvision required)
+python scripts/run_lightweight_tests.py
+
+# PyTorch-dependent tests
+python scripts/run_torch_tests.py
+
+# Model smoke test (synthetic batch only, no dataset downloads)
+python scripts/smoke_test_models.py --device cpu
+```
+
+The smoke test supports CUDA when available:
+
+```bash
+python scripts/smoke_test_models.py --device auto
+```
+
+For Kaggle validation cells (using Kaggle's built-in PyTorch runtime), see:
+`docs/kaggle_model_validation.md`.
+
 ## Configuration
 
 Core settings are managed in `configs/config.yaml`, including:

@@ -1,10 +1,12 @@
 dataset:
+  task: image_detection
   image_detection:
     train_csv: data/metadata/image_train.csv
     val_csv: data/metadata/image_val.csv
     test_csv: data/metadata/image_test.csv
     image_column: filepath
     label_column: label
+    root: .
 
   video_frame_detection:
     train_csv: data/metadata/frame_train.csv
@@ -12,6 +14,7 @@ dataset:
     test_csv: data/metadata/frame_test.csv
     frame_column: filepath
     label_column: label
+    root: .
 
 labels:
   0: real

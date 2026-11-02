@@ -27,6 +27,8 @@ env/
 # Data and artifacts
 data/
 datasets/
+!src/data/
+!src/data/**
 face_crops/
 outputs/
 results/checkpoints/

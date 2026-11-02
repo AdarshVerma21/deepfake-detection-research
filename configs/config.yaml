@@ -9,16 +9,23 @@ runtime:
   num_workers: 4
 
 training:
+  task: image_detection
   image_size: 224
   batch_size: 32
   learning_rate: 0.0003
+  weight_decay: 0.0001
   epochs: 20
-  optimizer: adam
+  scheduler: cosine     # cosine | step | plateau | none
+  scheduler_step_size: 5
+  scheduler_gamma: 0.1
+  early_stopping_patience: 5
+  gradient_clip_norm: 1.0
 
 model:
   name: efficientnet_b0   # efficientnet_b0 | xception
-  pretrained: true
-  num_classes: 2
+  num_classes: 1          # one logit; labels remain real=0 and fake=1
+  pretrained: false       # downloads are never performed automatically
+  weights_path: null      # optional local ImageNet/Xception checkpoint
 
 paths:
   train_images: data/processed/images/train

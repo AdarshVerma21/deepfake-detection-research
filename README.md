@@ -49,6 +49,65 @@ deepfake-detection-research/
 └── main.py
 ```
 
+## Models and training
+
+The shared manifest dataset applies the same RGB conversion, resize, ImageNet
+normalization, and train-only horizontal flip to both models. Official
+FaceForensics++ source-video split assignments remain the only split boundary;
+the test split is never used for model selection or threshold tuning.
+
+- **EfficientNet-B0** uses `torchvision.models.efficientnet_b0` with its final
+  layer replaced by one binary logit. ImageNet weights are optional and must be
+  supplied as a local checkpoint; the code never downloads weights silently.
+  The torchvision implementation and distributed weights are documented at
+  [pytorch.org/vision](https://pytorch.org/vision/stable/models.html) and are
+  distributed under their stated BSD-compatible licenses.
+- **XceptionNet** is a reproducible Xception-style entry/middle/exit-flow
+  network using depthwise separable convolutions, global average pooling, and a
+  one-logit classifier. It is implemented locally from the architecture
+  described by Chollet (2017); no external checkpoint is assumed.
+
+Both models use BCE-with-logits, AdamW, a configurable scheduler, gradient
+clipping, early stopping, best/last checkpoints, resume support, and optional
+CUDA AMP. Each model writes to `outputs/checkpoints/<model>/` and
+`outputs/logs/<model>/`.
+
+### Training and evaluation
+
+Create CSV manifests with `filepath` and `label` columns, update
+`configs/dataset.yaml`, then run:
+
+```bash
+python scripts/train.py --config configs/config.yaml
+python scripts/train.py --config configs/config.yaml --resume-from outputs/checkpoints/efficientnet_b0/last.pt
+python scripts/evaluate.py --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/efficientnet_b0/best.pt \
+  --output results/efficientnet_b0/test_metrics.json
+```
+
+Set `training.task` to `video_frame_detection` for the frame manifest. To
+compare Xception, set `model.name: xception` and use a separate output
+directory or experiment configuration. The reported metrics are frame/image
+level; they are not video-level metrics and no temporal aggregation is
+implemented here.
+
+### Kaggle NVIDIA T4
+
+Upload the repository and prepared manifests to a Kaggle notebook, select a
+GPU accelerator, install `requirements.txt`, set `runtime.device: auto` and
+`runtime.mixed_precision: true`, and run the same training command. Use an
+explicitly reduced `training.batch_size` or `training.image_size` if the T4
+cannot fit the configured experiment. CUDA out-of-memory errors are surfaced
+without changing settings automatically.
+
+### Reproducibility
+
+The seed controls Python, NumPy, PyTorch, data ordering, and deterministic
+CuDNN settings. Keep the final YAML, `history.json`, `best.pt`, `last.pt`, and
+training log together for an experiment. Datasets, checkpoints, and generated
+results are ignored by Git. No training has been executed in this repository,
+so no performance results are claimed.
+
 ## Methodology (Planned)
 
 - Build unified training/evaluation pipelines for two architectures

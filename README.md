@@ -14,6 +14,18 @@ Comparative study project for:
 6. External generalization evaluation on Celeb-DF v2
 7. Reproducible experimental workflow for IEEE-style reporting
 
+## Research Foundation
+
+The academic foundation, evidence boundaries, research gap, research questions, and planned protocol are documented in:
+
+- [Literature review](docs/literature_review.md)
+- [Research gap](docs/research_gap.md)
+- [Research questions](docs/research_questions.md)
+- [Experimental methodology](docs/experimental_methodology.md)
+- [Reference list and verification notes](docs/reference_list.md)
+
+The literature review contains 12 verified papers and clearly labels sources that could not be independently verified. No experimental results or unsupported novelty claims are made.
+
 ## Project Architecture
 
 ```text

@@ -19,7 +19,17 @@ def test_xception_binary_output_and_forward() -> None:
 
 def test_efficientnet_binary_classifier_output() -> None:
     model = create_model("efficientnet_b0", num_classes=1)
-    assert model(torch.randn(1, 3, 32, 32)).shape == (1, 1)
+    model.eval()
+    with torch.inference_mode():
+        output = model(torch.randn(1, 3, 32, 32))
+    assert output.shape == (1, 1)
+
+
+def test_efficientnet_training_mode_forward_uses_batch_statistics() -> None:
+    model = create_model("efficientnet_b0", num_classes=1)
+    model.train()
+    output = model(torch.randn(2, 3, 64, 64))
+    assert output.shape == (2, 1)
 
 
 def test_metrics_include_required_outputs() -> None:

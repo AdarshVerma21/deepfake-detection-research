@@ -38,3 +38,9 @@ paths:
   checkpoints: outputs/checkpoints
   logs: outputs/logs
   results: results
+
+robustness:
+  jpeg_qualities: [95, 75, 50]
+  gaussian_noise_stds: [0.01, 0.03, 0.05]
+  gaussian_blur_kernels: [3, 5, 7]
+  downscale_ratios: [0.75, 0.5, 0.25]

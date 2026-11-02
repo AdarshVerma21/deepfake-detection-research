@@ -20,9 +20,8 @@ experiments:
     grad_cam_target_layer: model.conv4
 
 robustness:
-  corruptions:
-    - gaussian_noise
-    - motion_blur
-    - jpeg_compression
-    - brightness_shift
-  severity_levels: [1, 2, 3, 4, 5]
+  clean_baseline: true
+  jpeg_qualities: [95, 75, 50]
+  gaussian_noise_stds: [0.01, 0.03, 0.05]
+  gaussian_blur_kernels: [3, 5, 7]
+  downscale_ratios: [0.75, 0.5, 0.25]

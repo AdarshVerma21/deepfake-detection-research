@@ -1,0 +1,28 @@
+experiments:
+  efficientnet_b0_images:
+    task: image_detection
+    model: efficientnet_b0
+    grad_cam_target_layer: features.8
+
+  xception_images:
+    task: image_detection
+    model: xception
+    grad_cam_target_layer: model.conv4
+
+  efficientnet_b0_frames:
+    task: video_frame_detection
+    model: efficientnet_b0
+    grad_cam_target_layer: features.8
+
+  xception_frames:
+    task: video_frame_detection
+    model: xception
+    grad_cam_target_layer: model.conv4
+
+robustness:
+  corruptions:
+    - gaussian_noise
+    - motion_blur
+    - jpeg_compression
+    - brightness_shift
+  severity_levels: [1, 2, 3, 4, 5]

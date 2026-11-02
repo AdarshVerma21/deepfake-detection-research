@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.secret
+
+# Data and artifacts
+data/
+datasets/
+face_crops/
+outputs/
+results/checkpoints/
+results/logs/
+results/predictions/
+results/gradcam/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# Notebook checkpoints
+.ipynb_checkpoints/

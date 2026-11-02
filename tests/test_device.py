@@ -1,5 +1,7 @@
 import pytest
 
+torch = pytest.importorskip("torch")
+
 from src.utils.device import get_runtime_device
 from src.utils.errors import DeviceConfigurationError
 

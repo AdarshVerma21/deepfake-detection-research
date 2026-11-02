@@ -1,0 +1,33 @@
+project:
+  name: deepfake-detection-research
+  experiment_name: baseline_efficientnet_b0
+
+runtime:
+  seed: 42
+  device: auto         # auto | cpu | cuda
+  mixed_precision: true
+  num_workers: 4
+
+training:
+  image_size: 224
+  batch_size: 32
+  learning_rate: 0.0003
+  epochs: 20
+  optimizer: adam
+
+model:
+  name: efficientnet_b0   # efficientnet_b0 | xception
+  pretrained: true
+  num_classes: 2
+
+paths:
+  train_images: data/processed/images/train
+  val_images: data/processed/images/val
+  test_images: data/processed/images/test
+  train_frames: data/processed/frames/train
+  val_frames: data/processed/frames/val
+  test_frames: data/processed/frames/test
+  external_eval: data/external/celeb_df_v2
+  checkpoints: outputs/checkpoints
+  logs: outputs/logs
+  results: results

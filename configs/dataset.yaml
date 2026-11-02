@@ -1,0 +1,21 @@
+dataset:
+  image_detection:
+    train_csv: data/metadata/image_train.csv
+    val_csv: data/metadata/image_val.csv
+    test_csv: data/metadata/image_test.csv
+    image_column: filepath
+    label_column: label
+
+  video_frame_detection:
+    train_csv: data/metadata/frame_train.csv
+    val_csv: data/metadata/frame_val.csv
+    test_csv: data/metadata/frame_test.csv
+    frame_column: filepath
+    label_column: label
+
+labels:
+  0: real
+  1: fake
+
+external_validation:
+  celeb_df_v2_csv: data/external/celeb_df_v2/metadata.csv

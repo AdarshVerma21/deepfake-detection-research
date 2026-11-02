@@ -19,3 +19,19 @@ labels:
 
 external_validation:
   celeb_df_v2_csv: data/external/celeb_df_v2/metadata.csv
+
+faceforensics:
+  dataset_root: data/raw/faceforensics
+  output_dir: data/processed/faceforensics_c23
+  split_dir: data/raw/faceforensics/splits
+  frames_per_video: 5
+  crop_size: 224
+  detector: haar
+  sampling_strategy: uniform
+  seed: 42
+  categories:
+    - original
+    - Deepfakes
+    - Face2Face
+    - FaceSwap
+    - NeuralTextures

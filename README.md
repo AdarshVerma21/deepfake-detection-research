@@ -95,6 +95,45 @@ Additional experiment-specific and dataset-specific settings are in:
 3. Implement/extend model, training, evaluation, and explainability modules in `src/`.
 4. Add and run tests before experiment execution.
 
+## FaceForensics++ c23 Dataset Preparation
+
+The preparation pipeline does not download FaceForensics++ or require access
+credentials. Place the approved archive under a local, ignored directory with
+this structure (the category names and `c23` level are significant):
+
+```text
+data/raw/faceforensics/
+├── original_sequences/youtube/c23/
+├── manipulated_sequences/Deepfakes/c23/
+├── manipulated_sequences/Face2Face/c23/
+├── manipulated_sequences/FaceSwap/c23/
+├── manipulated_sequences/NeuralTextures/c23/
+└── splits/                 # optional official train.json, val.json, test.json
+```
+
+Configure the root, output directory, sampling, crop size, detector, seed, and
+categories in `configs/dataset.yaml`, or override them on the command line.
+The default detector is OpenCV's bundled Haar cascade; detector changes should
+be recorded in the experiment methodology. The generated manifest contains
+source-video IDs and preserves source-level split assignments when official
+split files are supplied. Identity disjointness is not inferred or claimed.
+
+Run a small CPU-friendly pilot (at most 10 videos and 5 frames per video):
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root data/raw/faceforensics \
+  --split-dir data/raw/faceforensics/splits \
+  --output-dir data/processed/faceforensics_c23 \
+  --pilot
+```
+
+After dataset access is approved and the pilot is inspected, omit `--pilot`
+and set `--frames-per-video` as required to generate the full manifest. The
+command writes `manifest.csv`, `statistics.json`, face crops, and a log under
+the output directory. Statistics include class, split, manipulation, warning,
+and failure counts; no dataset counts are hard-coded or invented.
+
 ## GPU Compatibility (Kaggle NVIDIA T4)
 
 - Runtime device selection uses automatic CPU/CUDA detection.

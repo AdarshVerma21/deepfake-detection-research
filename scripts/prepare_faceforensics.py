@@ -1,0 +1,49 @@
+"""Command-line entrypoint for FaceForensics++ c23 preparation."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from src.data.faceforensics import FaceForensicsPipeline, FaceForensicsPipelineConfig, SUPPORTED_CATEGORIES
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Prepare FaceForensics++ c23 face crops and a CSV manifest.")
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, default=Path("data/processed/faceforensics_c23"))
+    parser.add_argument("--split-dir", type=Path)
+    parser.add_argument("--frames-per-video", type=int, default=5)
+    parser.add_argument("--crop-size", type=int, default=224)
+    parser.add_argument("--detector", choices=["haar"], default="haar")
+    parser.add_argument("--detector-config", type=Path)
+    parser.add_argument("--sampling-strategy", choices=["uniform", "random"], default="uniform")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--categories", nargs="+", choices=sorted(SUPPORTED_CATEGORIES), default=list(SUPPORTED_CATEGORIES))
+    parser.add_argument("--pilot", action="store_true", help="Process at most 10 videos and 5 frames per video.")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    frames = 5 if args.pilot else args.frames_per_video
+    config = FaceForensicsPipelineConfig(
+        dataset_root=args.dataset_root,
+        output_dir=args.output_dir,
+        split_dir=args.split_dir,
+        frames_per_video=frames,
+        crop_size=args.crop_size,
+        detector=args.detector,
+        detector_config=str(args.detector_config) if args.detector_config else None,
+        seed=args.seed,
+        categories=tuple(args.categories),
+        sampling_strategy=args.sampling_strategy,
+    )
+    report = FaceForensicsPipeline(config).run(limit_videos=10 if args.pilot else None)
+    print(f"Manifest: {report.manifest_path}")
+    print(f"Statistics: {report.statistics_path}")
+    print(f"Videos: {report.videos_discovered}, samples: {report.samples_written}, failures: {report.failures}")
+
+
+if __name__ == "__main__":
+    main()

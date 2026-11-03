@@ -120,7 +120,8 @@ python scripts/prepare_faceforensics.py \
   --dataset-root /kaggle/working/FaceForensics \
   --split-dir /kaggle/working/FaceForensics/splits \
   --output-dir /kaggle/working/data/processed/faceforensics_c23 \
-  --frames-per-video 10
+  --frames-per-video 10 \
+  --batch-size 100
 python scripts/train.py --config configs/config.yaml
 python scripts/evaluate_test.py \
   --config configs/config.yaml \
@@ -138,6 +139,43 @@ Evaluation reports frame-level accuracy, precision, recall, F1, ROC-AUC,
 PR-AUC, and a confusion matrix for the untouched official test CSV. It does
 not silently substitute video-level aggregation, and official source-video
 splits do not establish human-identity-disjointness.
+
+### Kaggle resumable preprocessing
+
+In a Kaggle notebook, upload the repository and the extracted FaceForensics++
+dataset, then run the preparation command from the repository root. The
+default progress file is written beside the manifest as
+`/kaggle/working/data/processed/faceforensics_c23/progress.json`.
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root /kaggle/input/faceforensics \
+  --split-dir /kaggle/input/faceforensics/splits \
+  --output-dir /kaggle/working/data/processed/faceforensics_c23 \
+  --frames-per-video 10 \
+  --batch-size 100
+```
+
+If the Kaggle session stops, rerun the same command with `--resume`. Completed
+video IDs are skipped, failed videos are retried, and the manifest and progress
+file are updated after each successful video:
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root /kaggle/input/faceforensics \
+  --split-dir /kaggle/input/faceforensics/splits \
+  --output-dir /kaggle/working/data/processed/faceforensics_c23 \
+  --frames-per-video 10 \
+  --batch-size 100 \
+  --resume \
+  --progress-file /kaggle/working/data/processed/faceforensics_c23/progress.json
+```
+
+Keep `/kaggle/working/data/processed/faceforensics_c23/` in the same Kaggle
+session or save it as a dataset between sessions so that `progress.json`,
+`manifest.csv`, and the generated `face_crops/` remain available. Once all
+batches finish, the command writes the final `train.csv`, `val.csv`, `test.csv`,
+and `statistics.json` from the final manifest.
 
 ### Kaggle NVIDIA T4
 

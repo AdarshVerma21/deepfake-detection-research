@@ -13,7 +13,14 @@ from src.data.faceforensics import (
     FaceForensicsPipelineConfig,
     discover_videos,
 )
-from src.data.kaggle_backup import BackupError, KaggleBackupManager, utc_checkpoint_time, validate_checkpoint
+from src.data.kaggle_backup import (
+    BackupError,
+    KaggleBackupManager,
+    manifest_video_ids,
+    utc_checkpoint_time,
+    validate_checkpoint,
+    validate_progress,
+)
 
 
 class KagglePreprocessingWorkflow:
@@ -59,16 +66,27 @@ class KagglePreprocessingWorkflow:
             )
             after = self._read_progress(progress_path)
             completed = {str(value) for value in after.get("completed_video_ids", [])}
+            manifest_count, fingerprint = validate_checkpoint(self.config.output_dir)
+            manifest_ids = manifest_video_ids(self.config.output_dir)
+            progress_ids = validate_progress(self.config.output_dir, manifest_ids)
+            if completed != progress_ids:
+                raise BackupError("Progress file changed during processing")
             missing = [record.video_id for record in chunk if record.video_id not in completed]
             if report.failures or missing:
                 raise BackupError(
                     f"Chunk {first}:{first + len(chunk)} is incomplete; "
                     f"failures={report.failures}, missing={missing}"
                 )
-            completed_count, fingerprint = validate_checkpoint(self.config.output_dir)
+            completed_count = len(progress_ids)
             previous = after.get("last_verified_backup", {})
             if previous.get("fingerprint") == fingerprint and previous.get("completed_videos") == completed_count:
                 raise BackupError("Checkpoint is unchanged; refusing duplicate upload")
+            recovered = self.backup.verify_latest(completed_count, fingerprint)
+            if recovered is not None:
+                self._record_verified_backup(
+                    progress_path, after, recovered.version, recovered.completed_videos, recovered.fingerprint
+                )
+                continue
             package, _ = self.backup.create_package(self.config.output_dir, completed_count)
             try:
                 uploaded = self.backup.upload(package, completed_count, fingerprint)

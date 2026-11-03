@@ -99,11 +99,45 @@ existing trained checkpoints and use the configured held-out test manifest.
 See [Explainability and robustness evaluation](docs/explainability_and_robustness.md)
 for corruption settings, failure handling, and Kaggle GPU validation commands.
 
-Set `training.task` to `video_frame_detection` for the frame manifest. To
+Set `training.task` to `video_frame_detection` for the frame manifest. The
+legacy `image_detection` section remains supported. To
 compare Xception, set `model.name: xception` and use a separate output
 directory or experiment configuration. The reported metrics are frame/image
 level; they are not video-level metrics and no temporal aggregation is
 implemented here.
+
+### FaceForensics++ preprocessing-to-training integration
+
+The preparation command preserves official train/validation/test assignments,
+writes `train.csv`, `val.csv`, and `test.csv`, and validates every
+`frame_path` relative to the preprocessing output directory. It rejects
+unknown or empty splits, invalid labels, missing images, and video/source
+video split leakage. `split_statistics.json` records per-split sample, class,
+video, and source-video counts.
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root /kaggle/working/FaceForensics \
+  --split-dir /kaggle/working/FaceForensics/splits \
+  --output-dir /kaggle/working/data/processed/faceforensics_c23 \
+  --frames-per-video 10
+python scripts/train.py --config configs/config.yaml
+python scripts/evaluate_test.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/efficientnet_b0/best.pt \
+  --output results/efficientnet_b0/test_metrics.json \
+  --predictions results/efficientnet_b0/test_predictions.csv
+```
+
+`weighted_loss` computes `negative_count / positive_count` from training rows
+only, requires both classes, and passes the result as `pos_weight` to
+`BCEWithLogitsLoss`. The default Haar detector is fast and reproducible but
+can miss faces or produce false positives under pose, occlusion, lighting, and
+compression; warnings and failed detections are recorded rather than hidden.
+Evaluation reports frame-level accuracy, precision, recall, F1, ROC-AUC,
+PR-AUC, and a confusion matrix for the untouched official test CSV. It does
+not silently substitute video-level aggregation, and official source-video
+splits do not establish human-identity-disjointness.
 
 ### Kaggle NVIDIA T4
 
@@ -229,9 +263,10 @@ python scripts/prepare_faceforensics.py \
 
 After dataset access is approved and the pilot is inspected, omit `--pilot`
 and set `--frames-per-video` as required to generate the full manifest. The
-command writes `manifest.csv`, `statistics.json`, face crops, and a log under
-the output directory. Statistics include class, split, manipulation, warning,
-and failure counts; no dataset counts are hard-coded or invented.
+command writes `manifest.csv`, split CSVs, `statistics.json`,
+`split_statistics.json`, face crops, and a log under the output directory.
+Statistics include class, split, manipulation, warning, and failure counts; no
+dataset counts are hard-coded or invented.
 
 ## GPU Compatibility (Kaggle NVIDIA T4)
 

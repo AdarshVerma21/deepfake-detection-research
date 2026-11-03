@@ -9,12 +9,12 @@ dataset:
     root: .
 
   video_frame_detection:
-    train_csv: data/metadata/frame_train.csv
-    val_csv: data/metadata/frame_val.csv
-    test_csv: data/metadata/frame_test.csv
-    frame_column: filepath
+    train_csv: data/processed/faceforensics_c23/train.csv
+    val_csv: data/processed/faceforensics_c23/val.csv
+    test_csv: data/processed/faceforensics_c23/test.csv
+    frame_column: frame_path
     label_column: label
-    root: .
+    root: data/processed/faceforensics_c23
 
 labels:
   0: real

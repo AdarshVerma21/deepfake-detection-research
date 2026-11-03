@@ -30,6 +30,21 @@ class TrainingConfig:
     mixed_precision: bool = True
     seed: int = 42
     checkpoint_dir: str = "outputs/checkpoints"
+    class_imbalance_mode: str = "none"
+    positive_class_weight: float | None = None
+
+
+def build_binary_criterion(config: TrainingConfig, device: torch.device) -> nn.Module:
+    """Build the configured binary loss without inspecting dataset labels."""
+    if config.class_imbalance_mode not in {"none", "weighted_loss"}:
+        raise ValueError("class_imbalance_mode must be 'none' or 'weighted_loss'")
+    if config.class_imbalance_mode == "weighted_loss":
+        if config.positive_class_weight is None or config.positive_class_weight <= 0:
+            raise ValueError("weighted_loss requires a positive positive_class_weight")
+        return nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(config.positive_class_weight, device=device, dtype=torch.float32)
+        )
+    return nn.BCEWithLogitsLoss()
 
 
 def save_checkpoint(
@@ -132,7 +147,7 @@ def train_model(
     set_seed(config.seed)
     device = torch.device(device)
     model.to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = build_binary_criterion(config, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler: Any
     if config.scheduler == "cosine":

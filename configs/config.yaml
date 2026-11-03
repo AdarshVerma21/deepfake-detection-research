@@ -9,7 +9,8 @@ runtime:
   num_workers: 4
 
 training:
-  task: image_detection
+  task: video_frame_detection
+  class_imbalance_mode: none  # none | weighted_loss
   image_size: 224
   batch_size: 32
   learning_rate: 0.0003

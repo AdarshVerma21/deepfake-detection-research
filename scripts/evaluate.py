@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from torch.utils.data import DataLoader
 
 from src.data.dataset import ManifestImageDataset, build_transforms
-from src.evaluation.metrics import calculate_metrics
+from src.evaluation.test_evaluation import save_test_artifacts
 from src.models.classifiers import create_model
 from src.training.engine import load_checkpoint
 from src.utils.config import load_yaml_config
@@ -22,11 +24,15 @@ def main() -> None:
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", default="results/test_metrics.json")
+    parser.add_argument("--predictions", default="results/test_predictions.csv")
     args = parser.parse_args()
     config = load_yaml_config(args.config)
     runtime, training, model_cfg = config["runtime"], config["training"], config["model"]
     dataset_cfg = load_yaml_config("configs/dataset.yaml")["dataset"]
-    task_cfg = dataset_cfg[dataset_cfg.get("task", "image_detection")]
+    task = training.get("task", dataset_cfg.get("task", "image_detection"))
+    if task not in dataset_cfg:
+        raise ValueError(f"Unknown dataset task: {task}")
+    task_cfg = dataset_cfg[task]
     device = get_runtime_device(runtime["device"], runtime["mixed_precision"]).device
     dataset = ManifestImageDataset(
         task_cfg["test_csv"],
@@ -47,7 +53,19 @@ def main() -> None:
             labels.extend(targets.int().tolist())
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(calculate_metrics(labels, probabilities), indent=2, allow_nan=False), encoding="utf-8")
+    import csv
+
+    with Path(task_cfg["test_csv"]).open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    save_test_artifacts(
+        rows,
+        labels,
+        probabilities,
+        output,
+        args.predictions,
+        args.checkpoint,
+        task_cfg["test_csv"],
+    )
 
 
 if __name__ == "__main__":

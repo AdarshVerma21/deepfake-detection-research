@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.faceforensics import FaceForensicsPipeline, FaceForensicsPipelineConfig, SUPPORTED_CATEGORIES
+from src.data.manifest import prepare_split_manifests
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,8 +44,10 @@ def main() -> None:
         sampling_strategy=args.sampling_strategy,
     )
     report = FaceForensicsPipeline(config).run(limit_videos=10 if args.pilot else None)
+    split_report = prepare_split_manifests(report.manifest_path, args.output_dir)
     print(f"Manifest: {report.manifest_path}")
     print(f"Statistics: {report.statistics_path}")
+    print(f"Split CSVs: {', '.join(str(path) for path in split_report.split_paths.values())}")
     print(f"Videos: {report.videos_discovered}, samples: {report.samples_written}, failures: {report.failures}")
 
 

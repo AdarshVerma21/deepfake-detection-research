@@ -20,7 +20,20 @@ This prevents highly correlated frames from crossing splits, but it does not pro
 
 ## 3. Face preprocessing
 
-Use one documented face detector and one crop policy for both architectures. Store detector boxes and confidence values, reject or log failed detections, use a consistent margin, resize to the configured 224 x 224 input, and apply the same channel normalization. Avoid test-time face-detector tuning. Report whether multiple faces are retained, ranked, or excluded.
+Use one documented face detector and one crop policy for both architectures.
+The current default is OpenCV's Haar cascade: it is CPU-friendly but can miss
+faces or produce false positives under pose, occlusion, lighting, and
+compression, so failed detections are logged and excluded. Resize accepted
+crops to the configured 224 x 224 input and apply the same channel
+normalization. Avoid test-time face-detector tuning. Report whether multiple
+faces are retained, ranked, or excluded.
+
+The combined manifest retains `video_id`, `source_video_id`, manipulation,
+numeric label, official split, frame path/index, original video path, and
+video metadata. Split CSVs are generated without random resplitting. Paths are
+resolved relative to the preprocessing output directory, and missing images,
+invalid labels, unknown splits, and video/source-video split leakage are
+rejected.
 
 ## 4. Model initialization and fair training
 
@@ -36,7 +49,11 @@ Distinguish three units explicitly:
 - **Frame-level:** one face crop extracted from one video frame; this is an image-level prediction with a video-frame provenance.
 - **Video-level:** one prediction obtained by aggregating frame probabilities within a source video.
 
-Image-level and frame-level metrics may be reported descriptively, but video-level metrics are the primary inferential unit because frames from the same video are correlated.
+Image-level and frame-level metrics are reported separately from video-level
+metrics. The Stage 6 test CLI reports frame-level metrics for the untouched
+official test CSV; it does not aggregate frames into video predictions. Any
+future video-level analysis must define and report its aggregation rule because
+frames from the same video are correlated.
 
 Report frame-level and video-level metrics separately:
 

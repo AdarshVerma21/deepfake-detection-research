@@ -23,6 +23,7 @@ The academic foundation, evidence boundaries, research gap, research questions, 
 - [Research questions](docs/research_questions.md)
 - [Experimental methodology](docs/experimental_methodology.md)
 - [Reference list and verification notes](docs/reference_list.md)
+- [Explainability and robustness evaluation](docs/explainability_and_robustness.md)
 
 The literature review contains 12 verified papers and clearly labels sources that could not be independently verified. No experimental results or unsupported novelty claims are made.
 
@@ -83,7 +84,20 @@ python scripts/train.py --config configs/config.yaml --resume-from outputs/check
 python scripts/evaluate.py --config configs/config.yaml \
   --checkpoint outputs/checkpoints/efficientnet_b0/best.pt \
   --output results/efficientnet_b0/test_metrics.json
+
+# Stage 5: Grad-CAM overlays and paired robustness evaluation
+python scripts/generate_gradcam.py --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/efficientnet_b0/best.pt
+python scripts/evaluate_robustness.py --config configs/config.yaml \
+  --checkpoint-efficientnet outputs/checkpoints/efficientnet_b0/best.pt \
+  --checkpoint-xception outputs/checkpoints/xception/best.pt
 ```
+
+Grad-CAM outputs are written to `results/explainability/`; robustness metrics
+are written to `results/robustness/metrics.json`. Both commands require
+existing trained checkpoints and use the configured held-out test manifest.
+See [Explainability and robustness evaluation](docs/explainability_and_robustness.md)
+for corruption settings, failure handling, and Kaggle GPU validation commands.
 
 Set `training.task` to `video_frame_detection` for the frame manifest. To
 compare Xception, set `model.name: xception` and use a separate output
@@ -163,6 +177,7 @@ Core settings are managed in `configs/config.yaml`, including:
 - Device selection (`auto`, `cpu`, `cuda`)
 - Mixed precision toggle
 - Number of workers
+- Robustness transformation parameters and deterministic seed
 
 Additional experiment-specific and dataset-specific settings are in:
 

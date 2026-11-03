@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import shutil
+import sys
 
 import torch
 from torch.utils.data import DataLoader
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import ManifestImageDataset, build_transforms
 from src.models.classifiers import create_model
@@ -59,16 +62,16 @@ def main() -> None:
     shutil.copyfile(args.config, output / "final_config.yaml")
     train_config = {key: value for key, value in training.items() if key in TrainingConfig.__dataclass_fields__}
     imbalance_mode = training.get("class_imbalance_mode", "none")
-    negative_count, positive_count, positive_weight = calculate_training_class_weight(train_data)
     if imbalance_mode == "weighted_loss":
+        negative_count, positive_count, positive_weight = calculate_training_class_weight(train_data)
         train_config["positive_class_weight"] = positive_weight
-    logger.info(
-        "training_class_counts real=%d fake=%d positive_class_weight=%.6f mode=%s",
-        negative_count,
-        positive_count,
-        positive_weight,
-        imbalance_mode,
-    )
+        logger.info(
+            "training_class_counts real=%d fake=%d positive_class_weight=%.6f mode=%s",
+            negative_count,
+            positive_count,
+            positive_weight,
+            imbalance_mode,
+        )
     train_config["checkpoint_dir"] = str(output)
     train_config["mixed_precision"] = device_cfg.use_mixed_precision
     train_model(

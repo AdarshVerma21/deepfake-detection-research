@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.faceforensics import FaceForensicsPipeline, FaceForensicsPipelineConfig, SUPPORTED_CATEGORIES
 from src.data.manifest import prepare_split_manifests

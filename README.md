@@ -117,10 +117,10 @@ video, and source-video counts.
 
 ```bash
 python scripts/prepare_faceforensics.py \
-  --dataset-root /kaggle/input/faceforensics/faceforensics \
-  --split-dir /kaggle/input/faceforensics/faceforensics/splits \
+  --dataset-root /kaggle/working/FaceForensics \
+  --split-dir /kaggle/working/FaceForensics/splits \
   --output-dir /kaggle/working/data/processed/faceforensics_c23 \
-  --frames-per-video 5
+  --frames-per-video 10
 python scripts/train.py --config configs/config.yaml
 python scripts/evaluate_test.py \
   --config configs/config.yaml \

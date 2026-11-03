@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from torch.utils.data import DataLoader
@@ -26,7 +29,10 @@ def main() -> None:
     config = load_yaml_config(args.config)
     runtime, training, model_cfg = config["runtime"], config["training"], config["model"]
     dataset_cfg = load_yaml_config("configs/dataset.yaml")["dataset"]
-    task_cfg = dataset_cfg[dataset_cfg.get("task", "image_detection")]
+    task = training.get("task", dataset_cfg.get("task", "image_detection"))
+    if task not in dataset_cfg:
+        raise ValueError(f"Unknown dataset task: {task}")
+    task_cfg = dataset_cfg[task]
     device = get_runtime_device(runtime["device"], runtime["mixed_precision"]).device
     dataset = ManifestImageDataset(
         task_cfg["test_csv"],

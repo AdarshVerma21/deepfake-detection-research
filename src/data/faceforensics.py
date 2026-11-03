@@ -311,14 +311,25 @@ class FaceForensicsPipeline:
         batch_size: int = 100,
         resume: bool = False,
         progress_file: str | Path | None = None,
+        start_index: int = 0,
+        max_videos: int | None = None,
     ) -> PipelineReport:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
+        if start_index < 0:
+            raise ValueError("start_index must be non-negative")
+        if max_videos is not None and max_videos < 1:
+            raise ValueError("max_videos must be at least 1 when provided")
+        if limit_videos is not None and max_videos is not None:
+            raise ValueError("Use either limit_videos or max_videos, not both")
         validate_dataset_root(self.config.dataset_root, self.config.categories)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         records = discover_videos(self.config.dataset_root, self.config.categories, self.logger)
         if limit_videos is not None:
-            records = records[: max(0, limit_videos)]
+            max_videos = limit_videos
+        records = records[start_index:]
+        if max_videos is not None:
+            records = records[:max_videos]
         assignments = load_split_assignments(self.config.split_dir, self.logger)
         manifest_path = self.config.output_dir / "manifest.csv"
         progress_path = Path(progress_file) if progress_file else self.config.output_dir / "progress.json"

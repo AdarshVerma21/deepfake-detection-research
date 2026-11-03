@@ -1,54 +1,69 @@
 # FaceForensics++ preprocessing
 
-The preprocessing pipeline preserves the official FaceForensics++ c23
-train/validation/test assignments and the research configuration of 224x224
-face crops. It reads the dataset from the supplied input path and never writes
-to the dataset directory.
+The preprocessing preserves the official FaceForensics++ c23
+train/validation/test assignments, uniform sampling, seed 42, Haar detection,
+10 frames per video, and 224x224 crops. The raw dataset is
+`adarshverma21/faceforensics-c23-research`; the processed checkpoint dataset is
+`adarshverma21/faceforensics-c23-processed-checkpoints`. Both must remain
+private.
 
-## Kaggle command
+## Exact Kaggle notebook instructions
 
-Kaggle input datasets are read-only, and `/kaggle/working` is temporary. Store
-the extracted FaceForensics++ data and official split JSON files in
-`/kaggle/input/faceforensics`, then write generated artifacts to working
-storage:
+1. Attach the raw private dataset to the notebook. Make the extracted videos
+   and official split JSON files available under `/kaggle/input/faceforensics`.
+2. Upload/clone this repository into `/kaggle/working/repository`, then run:
 
 ```bash
-python scripts/prepare_faceforensics.py \
+cd /kaggle/working/repository
+pip install -r requirements.txt
+python scripts/run_kaggle_preprocessing.py \
   --dataset-root /kaggle/input/faceforensics \
   --split-dir /kaggle/input/faceforensics/splits \
   --output-dir /kaggle/working/faceforensics_c23 \
-  --progress-file /kaggle/working/faceforensics_c23-state/progress.json \
+  --kaggle-dataset adarshverma21/faceforensics-c23-processed-checkpoints \
   --frames-per-video 10 \
   --crop-size 224 \
-  --batch-size 100
+  --chunk-size 100
 ```
 
-The manifest is atomically replaced once per completed batch. Progress is
-atomically replaced only after that manifest checkpoint succeeds. Crops made
-by an interrupted batch may remain on disk, but they are not considered
-complete until their manifest rows are checkpointed.
+The workflow processes deterministic discovery-order ranges, atomically saves
+the manifest and progress state, packages all crops without credentials, and
+uploads a complete new private Kaggle version after each chunk. It verifies
+both the upload command and dataset status before processing another chunk.
+It never passes `--public`.
 
-## Recovery
-
-Save `/kaggle/working/faceforensics_c23` and the independent progress directory
-as a Kaggle dataset, or keep them in the same session. Restore both before
-running:
+3. If the session is interrupted, start a new session with the same arguments
+   and add `--resume`:
 
 ```bash
-python scripts/prepare_faceforensics.py \
+cd /kaggle/working/repository
+python scripts/run_kaggle_preprocessing.py \
   --dataset-root /kaggle/input/faceforensics \
   --split-dir /kaggle/input/faceforensics/splits \
   --output-dir /kaggle/working/faceforensics_c23 \
-  --progress-file /kaggle/working/faceforensics_c23-state/progress.json \
-  --frames-per-video 10 \
-  --crop-size 224 \
-  --batch-size 100 \
-  --resume
+  --kaggle-dataset adarshverma21/faceforensics-c23-processed-checkpoints \
+  --frames-per-video 10 --crop-size 224 --chunk-size 100 --resume
 ```
 
-Resume validation requires matching preprocessing configuration. Videos are
-skipped only when their manifest rows exist and every referenced crop file is
-present. Missing progress is rebuilt from those records; malformed progress is
-ignored and safely rewritten. A missing crop, failed video, or incomplete batch
-is retried. Do not upload datasets automatically or provide Kaggle credentials
-to this command.
+Resume downloads the latest verified checkpoint, validates `manifest.csv` and
+every referenced crop, and resumes at the first incomplete video. A failed
+upload or failed verification exits before the next chunk; rerun with
+`--resume` after fixing Kaggle access.
+
+Use `--start-index N` and `--max-videos M` for a bounded run. Indices are
+zero-based in sorted discovery order. The lower-level
+`scripts/prepare_faceforensics.py` command supports these range controls for
+local preprocessing but does not upload backups.
+
+## Local preprocessing
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root /path/to/FaceForensics \
+  --split-dir /path/to/FaceForensics/splits \
+  --output-dir data/processed/faceforensics_c23 \
+  --frames-per-video 10 --crop-size 224 --batch-size 100
+```
+
+The output directory is never written into the raw dataset. Split manifests
+are generated only after the combined manifest and referenced crops validate.

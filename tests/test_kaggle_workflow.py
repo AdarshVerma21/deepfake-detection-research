@@ -9,9 +9,22 @@ from src.data.faceforensics import MANIFEST_COLUMNS
 from src.data.kaggle_backup import (
     BackupError,
     KaggleBackupManager,
+    _configuration_fingerprint,
     validate_checkpoint,
     validate_progress,
 )
+
+
+def _configuration(dataset_root: Path) -> dict:
+    return {
+        "frames_per_video": 10,
+        "crop_size": 224,
+        "detector": "haar",
+        "sampling_strategy": "uniform",
+        "seed": 42,
+        "categories": ["original", "Deepfakes"],
+        "dataset_identity": str(dataset_root.resolve()),
+    }
 
 
 def _checkpoint(root: Path, videos: int) -> None:
@@ -42,7 +55,13 @@ def _checkpoint(root: Path, videos: int) -> None:
         writer.writeheader()
         writer.writerows(rows)
     (root / "progress.json").write_text(
-        json.dumps({"completed_video_ids": [f"{index:03d}" for index in range(videos)], "completed_videos": videos}),
+        json.dumps(
+            {
+                "completed_video_ids": [f"{index:03d}" for index in range(videos)],
+                "completed_videos": videos,
+                "configuration": _configuration(root / "dataset"),
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -74,11 +93,13 @@ def test_package_excludes_credentials_and_upload_verifies_status(tmp_path: Path)
     manager = KaggleBackupManager(
         "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
     )
-    package, fingerprint = manager.create_package(tmp_path, 2)
+    configuration = _configuration(tmp_path / "dataset")
+    package, fingerprint = manager.create_package(tmp_path, 2, configuration)
     package_holder["package"] = package
     assert not (package / "kaggle.json").exists()
-    uploaded = manager.upload(package, 2, fingerprint)
+    uploaded = manager.upload(package, 2, fingerprint, configuration=configuration)
     assert uploaded.version == "latest"
+    assert uploaded.configuration == configuration
     assert calls[0][:4] == ["kaggle", "datasets", "version", "-p"]
     assert calls[1][:4] == ["kaggle", "datasets", "status", "-d"]
     assert "--json" not in calls[1]
@@ -111,7 +132,9 @@ def test_malformed_cli_version_output_fails_safely(tmp_path: Path) -> None:
     def runner(command, **kwargs):
         return type("Result", (), {"returncode": 0, "stdout": "Version: ???", "stderr": ""})()
 
-    manager = KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner)
+    manager = KaggleBackupManager(
+        "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
+    )
     package, fingerprint = manager.create_package(tmp_path, 1)
     with pytest.raises(BackupError, match="plain-text ready"):
         manager.upload(package, 1, fingerprint)
@@ -138,6 +161,21 @@ def test_privacy_verification_failure_fails_safely(tmp_path: Path) -> None:
 def test_interrupted_upload_can_be_verified_without_duplicate(tmp_path: Path) -> None:
     _checkpoint(tmp_path, 1)
     calls = []
+    configuration = _configuration(tmp_path / "dataset")
+    _, fingerprint = validate_checkpoint(tmp_path)
+    (tmp_path / "dataset-metadata.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": {
+                    "completed_videos": 1,
+                    "fingerprint": fingerprint,
+                    "configuration": configuration,
+                    "configuration_fingerprint": _configuration_fingerprint(configuration),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def runner(command, **kwargs):
         calls.append(command)
@@ -153,7 +191,7 @@ def test_interrupted_upload_can_be_verified_without_duplicate(tmp_path: Path) ->
         "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
     )
     count, fingerprint = validate_checkpoint(tmp_path)
-    recovered = manager.verify_latest(count, fingerprint, {"000"})
+    recovered = manager.verify_latest(count, fingerprint, {"000"}, configuration)
     assert recovered is not None
     assert recovered.version == "latest"
     assert not any(command[2] == "version" for command in calls)
@@ -164,8 +202,18 @@ def test_restore_validates_and_replaces_output_atomically(tmp_path: Path) -> Non
     output = tmp_path / "output"
     _checkpoint(source, 1)
     _, fingerprint = validate_checkpoint(source)
+    configuration = _configuration(source / "dataset")
     (source / "dataset-metadata.json").write_text(
-        json.dumps({"checkpoint": {"completed_videos": 1, "fingerprint": fingerprint}}),
+        json.dumps(
+            {
+                "checkpoint": {
+                    "completed_videos": 1,
+                    "fingerprint": fingerprint,
+                    "configuration": configuration,
+                    "configuration_fingerprint": _configuration_fingerprint(configuration),
+                }
+            }
+        ),
         encoding="utf-8",
     )
     output.mkdir()
@@ -182,9 +230,60 @@ def test_restore_validates_and_replaces_output_atomically(tmp_path: Path) -> Non
 
     KaggleBackupManager(
         "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
-    ).restore_latest(output)
+    ).restore_latest(output, configuration)
     assert not (output / "stale.txt").exists()
     assert (output / "manifest.csv").is_file()
+
+
+def test_restore_rejects_mismatching_preprocessing_configuration(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    _checkpoint(source, 1)
+    _, fingerprint = validate_checkpoint(source)
+    checkpoint_configuration = _configuration(source / "dataset")
+    (source / "dataset-metadata.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": {
+                    "completed_videos": 1,
+                    "fingerprint": fingerprint,
+                    "configuration": checkpoint_configuration,
+                    "configuration_fingerprint": _configuration_fingerprint(checkpoint_configuration),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    requested = dict(checkpoint_configuration, frames_per_video=5)
+
+    def runner(command, **kwargs):
+        if command[2] == "status":
+            return type("Result", (), {"returncode": 0, "stdout": "ready\n", "stderr": ""})()
+        destination = Path(command[command.index("-p") + 1])
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with pytest.raises(BackupError, match="incompatible"):
+        KaggleBackupManager(
+            "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
+        ).restore_latest(output, requested)
+    assert not output.exists()
+
+
+def test_clean_start_refuses_to_reuse_existing_output(tmp_path: Path) -> None:
+    output = tmp_path / "pilot"
+    output.mkdir()
+    from scripts.run_kaggle_preprocessing import ensure_clean_start
+
+    with pytest.raises(SystemExit, match="refusing to modify"):
+        ensure_clean_start(output, True)
+
+
+def test_clean_start_and_resume_are_mutually_exclusive() -> None:
+    from scripts.run_kaggle_preprocessing import ensure_start_mode
+
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        ensure_start_mode(True, True)
 
 
 def test_failed_upload_does_not_report_a_backup(tmp_path: Path) -> None:

@@ -84,6 +84,29 @@ class FaceForensicsPipelineConfig:
         if unknown:
             raise ValueError(f"Unsupported FaceForensics++ categories: {sorted(unknown)}")
 
+    def preprocessing_configuration(self) -> dict[str, Any]:
+        """Return the configuration that defines compatible preprocessing output."""
+
+        return {
+            "frames_per_video": self.frames_per_video,
+            "crop_size": self.crop_size,
+            "detector": self.detector,
+            "sampling_strategy": self.sampling_strategy,
+            "seed": self.seed,
+            "categories": list(self.categories),
+            "dataset_identity": str(self.dataset_root.resolve()),
+        }
+
+    def preprocessing_fingerprint(self) -> str:
+        """Return a stable fingerprint for compatible preprocessing output."""
+
+        encoded = json.dumps(
+            self.preprocessing_configuration(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
 
 @dataclass(frozen=True)
 class VideoRecord:
@@ -522,16 +545,12 @@ class FaceForensicsPipeline:
 
     def _configuration(self, batch_size: int) -> dict[str, Any]:
         return {
+            **self.config.preprocessing_configuration(),
+            "configuration_fingerprint": self.config.preprocessing_fingerprint(),
             "dataset_root": str(self.config.dataset_root),
             "output_dir": str(self.config.output_dir),
-            "frames_per_video": self.config.frames_per_video,
-            "crop_size": self.config.crop_size,
-            "detector": self.config.detector,
             "detector_config": self.config.detector_config,
-            "seed": self.config.seed,
-            "categories": list(self.config.categories),
             "split_dir": str(self.config.split_dir) if self.config.split_dir else None,
-            "sampling_strategy": self.config.sampling_strategy,
             "batch_size": batch_size,
         }
 

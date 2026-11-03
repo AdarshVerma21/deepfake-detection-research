@@ -35,11 +35,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm in Kaggle that the backup dataset is private; CLI 2.0.2 cannot verify this.",
     )
     parser.add_argument("--resume", action="store_true", help="Restore the latest verified Kaggle backup before continuing.")
+    parser.add_argument(
+        "--clean-start",
+        action="store_true",
+        help="Require a new output directory; never delete or reuse an existing pilot checkpoint.",
+    )
     return parser
+
+
+def ensure_clean_start(output_dir: Path, clean_start: bool) -> None:
+    if clean_start and output_dir.exists():
+        raise SystemExit(
+            f"--clean-start requires a new output directory; refusing to modify existing checkpoint: {output_dir}"
+        )
+
+
+def ensure_start_mode(clean_start: bool, resume: bool) -> None:
+    if clean_start and resume:
+        raise SystemExit("--clean-start cannot be combined with --resume")
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    ensure_start_mode(args.clean_start, args.resume)
+    ensure_clean_start(args.output_dir, args.clean_start)
     config = FaceForensicsPipelineConfig(
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,

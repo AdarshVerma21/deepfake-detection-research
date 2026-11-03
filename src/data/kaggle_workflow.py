@@ -44,8 +44,9 @@ class KagglePreprocessingWorkflow:
         if max_videos is not None and max_videos < 1:
             raise ValueError("max_videos must be at least 1 when provided")
         progress_path = self.config.output_dir / "progress.json"
+        configuration = self.config.preprocessing_configuration()
         if resume:
-            self.backup.restore_latest(self.config.output_dir)
+            self.backup.restore_latest(self.config.output_dir, configuration)
         records = discover_videos(self.config.dataset_root, self.config.categories)
         end_index = min(len(records), start_index + max_videos) if max_videos is not None else len(records)
         processed_limit = end_index
@@ -81,15 +82,21 @@ class KagglePreprocessingWorkflow:
             previous = after.get("last_verified_backup", {})
             if previous.get("fingerprint") == fingerprint and previous.get("completed_videos") == completed_count:
                 raise BackupError("Checkpoint is unchanged; refusing duplicate upload")
-            recovered = self.backup.verify_latest(completed_count, fingerprint, progress_ids)
+            recovered = self.backup.verify_latest(
+                completed_count, fingerprint, progress_ids, configuration
+            )
             if recovered is not None:
                 self._record_verified_backup(
                     progress_path, after, recovered.version, recovered.completed_videos, recovered.fingerprint
                 )
                 continue
-            package, _ = self.backup.create_package(self.config.output_dir, completed_count)
+            package, _ = self.backup.create_package(
+                self.config.output_dir, completed_count, configuration
+            )
             try:
-                uploaded = self.backup.upload(package, completed_count, fingerprint, progress_ids)
+                uploaded = self.backup.upload(
+                    package, completed_count, fingerprint, progress_ids, configuration
+                )
             finally:
                 import shutil
 

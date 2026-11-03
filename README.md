@@ -338,6 +338,24 @@ command writes `manifest.csv`, split CSVs, `statistics.json`,
 Statistics include class, split, manipulation, warning, and failure counts; no
 dataset counts are hard-coded or invented.
 
+Kaggle preprocessing checkpoints record the complete preprocessing
+configuration and refuse restores that do not match it. To begin a production
+run without reusing or overwriting a pilot checkpoint, use a new local output
+directory, a distinct private Kaggle dataset, and `--clean-start`:
+
+```bash
+python scripts/run_kaggle_preprocessing.py \
+  --dataset-root /kaggle/input/faceforensics \
+  --output-dir /kaggle/working/faceforensics_c23_production \
+  --kaggle-dataset adarshverma21/faceforensics-c23-production-checkpoints \
+  --frames-per-video 10 \
+  --clean-start \
+  --privacy-confirmed
+```
+
+`--clean-start` fails if the output directory already exists; it never deletes
+the pilot output or its private Kaggle backup.
+
 ## GPU Compatibility (Kaggle NVIDIA T4)
 
 - Runtime device selection uses automatic CPU/CUDA detection.

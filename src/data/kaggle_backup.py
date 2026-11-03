@@ -29,6 +29,7 @@ class BackupUpload:
     version: str
     completed_videos: int
     fingerprint: str
+    configuration: dict[str, Any]
 
 
 def _safe_files(root: Path) -> Iterable[Path]:
@@ -102,6 +103,54 @@ def validate_progress(root: Path, manifest_videos: set[str] | None = None) -> se
     return completed
 
 
+def _configuration_fingerprint(configuration: dict[str, Any]) -> str:
+    required = {
+        "frames_per_video",
+        "crop_size",
+        "detector",
+        "sampling_strategy",
+        "seed",
+        "categories",
+        "dataset_identity",
+    }
+    if set(configuration) != required:
+        missing = sorted(required - set(configuration))
+        extra = sorted(set(configuration) - required)
+        raise BackupError(
+            "Checkpoint preprocessing configuration must contain exactly the required fields "
+            f"(missing={missing}, extra={extra})"
+        )
+    if not isinstance(configuration["categories"], list) or not all(
+        isinstance(category, str) for category in configuration["categories"]
+    ):
+        raise BackupError("Checkpoint preprocessing configuration has invalid categories")
+    encoded = json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _checkpoint_configuration(progress: dict[str, Any]) -> dict[str, Any]:
+    configuration = progress.get("configuration")
+    if not isinstance(configuration, dict):
+        raise BackupError("Checkpoint progress has no preprocessing configuration")
+    required = (
+        "frames_per_video",
+        "crop_size",
+        "detector",
+        "sampling_strategy",
+        "seed",
+        "categories",
+        "dataset_identity",
+    )
+    result = {key: configuration.get(key) for key in required}
+    if any(value is None for value in result.values()):
+        raise BackupError("Checkpoint progress has an incomplete preprocessing configuration")
+    fingerprint = _configuration_fingerprint(result)
+    recorded_fingerprint = progress.get("configuration_fingerprint")
+    if recorded_fingerprint is not None and recorded_fingerprint != fingerprint:
+        raise BackupError("Checkpoint progress preprocessing configuration fingerprint is invalid")
+    return result
+
+
 class KaggleBackupManager:
     """Create complete private-dataset versions and verify their upload."""
 
@@ -117,12 +166,28 @@ class KaggleBackupManager:
         self._runner = runner or subprocess.run
         self.privacy_confirmed = privacy_confirmed
 
-    def create_package(self, output_dir: Path, completed_videos: int) -> tuple[Path, str]:
+    def create_package(
+        self,
+        output_dir: Path,
+        completed_videos: int,
+        configuration: dict[str, Any] | None = None,
+    ) -> tuple[Path, str]:
         count, fingerprint = validate_checkpoint(output_dir)
         if count != completed_videos:
             raise BackupError(f"Manifest contains {count} videos, expected {completed_videos}")
-        if (output_dir / "progress.json").is_file():
-            validate_progress(output_dir, manifest_video_ids(output_dir))
+        progress_path = output_dir / "progress.json"
+        if not progress_path.is_file():
+            raise BackupError(f"Checkpoint is missing {progress_path}")
+        validate_progress(output_dir, manifest_video_ids(output_dir))
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BackupError(f"Unable to read progress state: {progress_path}") from exc
+        recorded_configuration = _checkpoint_configuration(progress)
+        if configuration is not None and recorded_configuration != configuration:
+            raise BackupError("Checkpoint progress preprocessing configuration does not match the requested configuration")
+        configuration = recorded_configuration
+        configuration_fingerprint = _configuration_fingerprint(configuration)
         package = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-"))
         for source in _safe_files(output_dir):
             destination = package / source.relative_to(output_dir)
@@ -137,7 +202,12 @@ class KaggleBackupManager:
             "description": "Private FaceForensics++ c23 preprocessing checkpoints.",
             "licenses": [{"name": "other"}],
             "private": True,
-            "checkpoint": {"completed_videos": completed_videos, "fingerprint": fingerprint},
+            "checkpoint": {
+                "completed_videos": completed_videos,
+                "fingerprint": fingerprint,
+                "configuration": configuration,
+                "configuration_fingerprint": configuration_fingerprint,
+            },
         }
         (package / "dataset-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         return package, fingerprint
@@ -148,6 +218,7 @@ class KaggleBackupManager:
         completed_videos: int,
         fingerprint: str,
         expected_video_ids: set[str] | None = None,
+        configuration: dict[str, Any] | None = None,
     ) -> BackupUpload:
         if any("kaggle.json" in path.name.lower() or "credentials" in path.name.lower() for path in package.rglob("*")):
             raise BackupError("Refusing to upload credentials in checkpoint package")
@@ -160,14 +231,15 @@ class KaggleBackupManager:
         )
         if upload.returncode != 0:
             raise BackupError(f"Kaggle upload failed: {upload.stderr.strip()}")
+        self._require_manual_privacy_confirmation()
         metadata = self._status_metadata("Kaggle upload verification failed")
         verified = self._verify_version(
             self._status_version(metadata),
             completed_videos,
             fingerprint,
             expected_video_ids,
+            configuration,
         )
-        self._require_manual_privacy_confirmation()
         return verified
 
     def verify_latest(
@@ -175,6 +247,7 @@ class KaggleBackupManager:
         completed_videos: int,
         fingerprint: str,
         expected_video_ids: set[str] | None = None,
+        configuration: dict[str, Any] | None = None,
     ) -> BackupUpload | None:
         """Find a completed matching upload after an interruption."""
 
@@ -185,6 +258,7 @@ class KaggleBackupManager:
                 completed_videos,
                 fingerprint,
                 expected_video_ids,
+                configuration,
             )
             self._require_manual_privacy_confirmation()
             return verified
@@ -197,6 +271,7 @@ class KaggleBackupManager:
         completed_videos: int,
         fingerprint: str,
         expected_video_ids: set[str] | None = None,
+        configuration: dict[str, Any] | None = None,
     ) -> BackupUpload:
         destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-verify-"))
         try:
@@ -220,14 +295,28 @@ class KaggleBackupManager:
             manifest_count, actual_fingerprint = validate_checkpoint(roots[0])
             manifest_videos = manifest_video_ids(roots[0])
             progress_videos = validate_progress(roots[0], manifest_videos)
+            metadata_path = roots[0] / "dataset-metadata.json"
+            if not metadata_path.is_file():
+                raise BackupError("Kaggle backup is missing recorded metadata")
+            recorded = json.loads(metadata_path.read_text(encoding="utf-8"))
+            checkpoint = recorded.get("checkpoint") if isinstance(recorded, dict) else None
+            recorded_configuration = checkpoint.get("configuration") if isinstance(checkpoint, dict) else None
             if (
                 manifest_count != completed_videos
                 or len(progress_videos) != completed_videos
                 or actual_fingerprint != fingerprint
                 or (expected_video_ids is not None and progress_videos != expected_video_ids)
+                or (
+                    configuration is not None
+                    and recorded_configuration != configuration
+                )
             ):
                 raise _BackupMismatch("Kaggle backup version contents do not match the uploaded checkpoint")
-            return BackupUpload(version, len(progress_videos), actual_fingerprint)
+            if not isinstance(recorded_configuration, dict):
+                raise _BackupMismatch("Kaggle backup has no preprocessing configuration")
+            if checkpoint.get("configuration_fingerprint") != _configuration_fingerprint(recorded_configuration):
+                raise _BackupMismatch("Kaggle backup preprocessing configuration fingerprint is invalid")
+            return BackupUpload(version, len(progress_videos), actual_fingerprint, recorded_configuration)
         finally:
             shutil.rmtree(destination, ignore_errors=True)
 
@@ -261,7 +350,8 @@ class KaggleBackupManager:
                 "confirm the dataset is private in Kaggle, then retry with privacy_confirmed=True"
             )
 
-    def restore_latest(self, output_dir: Path) -> None:
+    def restore_latest(self, output_dir: Path, configuration: dict[str, Any]) -> None:
+        requested_fingerprint = _configuration_fingerprint(configuration)
         destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-restore-"))
         try:
             metadata = self._status_metadata("Kaggle restore verification failed")
@@ -293,6 +383,17 @@ class KaggleBackupManager:
             checkpoint = recorded.get("checkpoint", {})
             if not isinstance(checkpoint, dict):
                 raise BackupError("Restored backup metadata has no checkpoint record")
+            recorded_configuration = checkpoint.get("configuration")
+            if not isinstance(recorded_configuration, dict):
+                raise BackupError("Restored backup has no preprocessing configuration")
+            _configuration_fingerprint(recorded_configuration)
+            if recorded_configuration != configuration:
+                raise BackupError(
+                    "Restored checkpoint preprocessing configuration is incompatible with the requested "
+                    f"configuration: checkpoint={recorded_configuration}, requested={configuration}"
+                )
+            if checkpoint.get("configuration_fingerprint") != requested_fingerprint:
+                raise BackupError("Restored backup preprocessing configuration fingerprint is invalid")
             if checkpoint.get("completed_videos") != len(progress_videos) or checkpoint.get("fingerprint") != fingerprint:
                 raise BackupError("Restored backup fingerprint or completed-video count is invalid")
             if manifest_count != len(progress_videos):

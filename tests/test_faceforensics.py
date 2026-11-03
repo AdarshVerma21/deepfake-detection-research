@@ -143,6 +143,42 @@ def test_pipeline_batches_and_persists_progress(tmp_path: Path, monkeypatch) -> 
     assert progress["failed_videos"] == {}
 
 
+def test_pipeline_start_index_and_max_videos_bound_discovery_range(tmp_path: Path, monkeypatch) -> None:
+    root = _fixture_root(tmp_path)
+    for video_id in ("001", "002", "003"):
+        (root / f"original_sequences/youtube/c23/{video_id}.mp4").touch()
+    output = tmp_path / "output"
+    frame = np.full((32, 48, 3), 127, dtype=np.uint8)
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, property_id: int) -> float:
+            return {cv2.CAP_PROP_FRAME_COUNT: 1, cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_WIDTH: 48,
+                    cv2.CAP_PROP_FRAME_HEIGHT: 32}.get(property_id, 0)
+
+        def set(self, property_id: int, value: int) -> bool:
+            return True
+
+        def read(self):
+            return True, frame.copy()
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr("src.data.faceforensics.cv2.VideoCapture", FakeCapture)
+    detector = type("Detector", (), {"detect": lambda self, image: [(4, 4, 20, 20)]})()
+    config = FaceForensicsPipelineConfig(dataset_root=root, output_dir=output, categories=("original",), frames_per_video=1)
+    report = FaceForensicsPipeline(config, face_detector=detector).run(start_index=1, max_videos=2, batch_size=2)
+    assert report.videos_discovered == 2
+    with (output / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        assert [row["video_id"] for row in __import__("csv").DictReader(handle)] == ["001", "002"]
+
+
 def test_pipeline_resumes_skips_completed_and_retries_failed_without_duplicates(tmp_path: Path, monkeypatch) -> None:
     root = _fixture_root(tmp_path)
     output = tmp_path / "output"

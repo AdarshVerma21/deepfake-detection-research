@@ -148,35 +148,37 @@ default progress file is written beside the manifest as
 `/kaggle/working/data/processed/faceforensics_c23/progress.json`.
 
 ```bash
-python scripts/prepare_faceforensics.py \
+python scripts/run_kaggle_preprocessing.py \
   --dataset-root /kaggle/input/faceforensics \
   --split-dir /kaggle/input/faceforensics/splits \
   --output-dir /kaggle/working/data/processed/faceforensics_c23 \
   --frames-per-video 10 \
-  --batch-size 100
+  --chunk-size 100 \
+  --kaggle-dataset adarshverma21/faceforensics-c23-processed-checkpoints
 ```
 
-`/kaggle/input` is read-only and `/kaggle/working` is temporary. Keep the
-dataset and split files under `/kaggle/input`; write crops, manifests, and
-progress under `/kaggle/working`, or restore those outputs from a saved Kaggle
-dataset before resuming. The manifest is checkpointed once per batch. A batch
-interrupted before its checkpoint is safely reprocessed, and completed IDs are
-recorded only after the batch manifest replacement succeeds.
+`/kaggle/input` is read-only and `/kaggle/working` is temporary. The workflow
+uploads a complete private checkpoint after every successfully completed chunk
+and verifies the Kaggle CLI status before continuing. A failed or interrupted
+upload never advances the workflow.
 
 If the Kaggle session stops, rerun the same command with `--resume`. Completed
 videos with every manifest crop present are skipped, failed videos are retried,
 and missing/corrupt progress is rebuilt from the manifest and crop files:
 
 ```bash
-python scripts/prepare_faceforensics.py \
+python scripts/run_kaggle_preprocessing.py \
   --dataset-root /kaggle/input/faceforensics \
   --split-dir /kaggle/input/faceforensics/splits \
   --output-dir /kaggle/working/data/processed/faceforensics_c23 \
+  --kaggle-dataset adarshverma21/faceforensics-c23-processed-checkpoints \
   --frames-per-video 10 \
-  --batch-size 100 \
-  --resume \
-  --progress-file /kaggle/working/data/processed/faceforensics_c23/progress.json
+  --chunk-size 100 \
+  --resume
 ```
+
+For exact setup, recovery, privacy, and credential-safety instructions, see
+`docs/faceforensics_preprocessing.md`.
 
 The output and progress locations are independent. For example, keep a
 progress file in a restored working directory while writing a new output

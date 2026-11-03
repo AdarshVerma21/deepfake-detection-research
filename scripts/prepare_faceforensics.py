@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed/faceforensics_c23"))
     parser.add_argument("--split-dir", type=Path)
-    parser.add_argument("--frames-per-video", type=int, default=5)
+    parser.add_argument("--frames-per-video", type=int, default=10)
     parser.add_argument("--crop-size", type=int, default=224)
     parser.add_argument("--detector", choices=["haar"], default="haar")
     parser.add_argument("--detector-config", type=Path)
@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--categories", nargs="+", choices=sorted(SUPPORTED_CATEGORIES), default=list(SUPPORTED_CATEGORIES))
     parser.add_argument("--pilot", action="store_true", help="Process at most 10 videos and 5 frames per video.")
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--start-index", type=int, default=0, help="Zero-based index in deterministic discovery order.")
+    parser.add_argument("--max-videos", type=int, help="Maximum number of videos to process from --start-index.")
     parser.add_argument("--resume", action="store_true", help="Resume from the progress file and skip completed videos.")
     parser.add_argument("--progress-file", type=Path, help="Path to the resumable progress JSON file.")
     return parser
@@ -51,6 +53,8 @@ def main() -> None:
         batch_size=args.batch_size,
         resume=args.resume,
         progress_file=args.progress_file,
+        start_index=args.start_index,
+        max_videos=10 if args.pilot else args.max_videos,
     )
     split_report = prepare_split_manifests(report.manifest_path, args.output_dir)
     print(f"Manifest: {report.manifest_path}")

@@ -8,17 +8,20 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable
 
 from src.data.faceforensics import MANIFEST_COLUMNS
 
 
 class BackupError(RuntimeError):
     """Raised when a checkpoint cannot be safely packaged or verified."""
+
+
+class _BackupMismatch(BackupError):
+    """Raised when a remote version is valid but is not the requested checkpoint."""
 
 
 @dataclass(frozen=True)
@@ -66,9 +69,37 @@ def validate_checkpoint(root: Path) -> tuple[int, str]:
         videos.add(row["video_id"])
     digest = hashlib.sha256()
     for path in _safe_files(root):
+        if path.name == "dataset-metadata.json":
+            continue
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
     return len(videos), digest.hexdigest()
+
+
+def validate_progress(root: Path, manifest_videos: set[str] | None = None) -> set[str]:
+    """Validate progress state independently from the manifest video count."""
+
+    path = root / "progress.json"
+    if not path.is_file():
+        raise BackupError(f"Checkpoint is missing {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BackupError(f"Unable to read progress state: {path}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("completed_video_ids"), list):
+        raise BackupError("Checkpoint progress has no completed_video_ids list")
+    completed = {str(item) for item in value["completed_video_ids"]}
+    if len(completed) != len(value["completed_video_ids"]):
+        raise BackupError("Checkpoint progress contains duplicate completed video IDs")
+    recorded = value.get("completed_videos")
+    if recorded is not None and recorded != len(completed):
+        raise BackupError("Checkpoint progress completed_videos disagrees with completed_video_ids")
+    if manifest_videos is not None and completed != manifest_videos:
+        raise BackupError(
+            "Checkpoint progress and manifest disagree: "
+            f"progress={len(completed)}, manifest={len(manifest_videos)}"
+        )
+    return completed
 
 
 class KaggleBackupManager:
@@ -88,6 +119,8 @@ class KaggleBackupManager:
         count, fingerprint = validate_checkpoint(output_dir)
         if count != completed_videos:
             raise BackupError(f"Manifest contains {count} videos, expected {completed_videos}")
+        if (output_dir / "progress.json").is_file():
+            validate_progress(output_dir, manifest_video_ids(output_dir))
         package = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-"))
         for source in _safe_files(output_dir):
             destination = package / source.relative_to(output_dir)
@@ -119,23 +152,97 @@ class KaggleBackupManager:
         )
         if upload.returncode != 0:
             raise BackupError(f"Kaggle upload failed: {upload.stderr.strip()}")
+        metadata = self._status_metadata("Kaggle upload verification failed")
+        version = self._status_version(metadata)
+        if not self._status_private(metadata):
+            raise BackupError("Kaggle backup privacy could not be confirmed as private")
+        verified = self._verify_version(version, completed_videos, fingerprint)
+        return verified
+
+    def verify_latest(self, completed_videos: int, fingerprint: str) -> BackupUpload | None:
+        """Find a completed matching upload after an interruption."""
+
+        metadata = self._status_metadata("Kaggle backup verification failed")
+        if not self._status_private(metadata):
+            raise BackupError("Kaggle backup privacy could not be confirmed as private")
+        version = self._status_version(metadata)
+        try:
+            return self._verify_version(version, completed_videos, fingerprint)
+        except _BackupMismatch:
+            return None
+
+    def _verify_version(self, version: str, completed_videos: int, fingerprint: str) -> BackupUpload:
+        destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-verify-"))
+        try:
+            result = self._runner(
+                [
+                    "kaggle", "datasets", "download", "-d", self.dataset,
+                    "-p", str(destination), "--unzip", "--dataset-version-number", version,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise BackupError(f"Kaggle backup version verification failed: {result.stderr.strip()}")
+            roots = [path.parent for path in destination.rglob("manifest.csv")]
+            if len(roots) != 1:
+                raise BackupError("Kaggle backup version verification found an ambiguous manifest")
+            manifest_count, actual_fingerprint = validate_checkpoint(roots[0])
+            manifest_videos = manifest_video_ids(roots[0])
+            progress_videos = validate_progress(roots[0], manifest_videos)
+            if (
+                manifest_count != completed_videos
+                or len(progress_videos) != completed_videos
+                or actual_fingerprint != fingerprint
+            ):
+                raise _BackupMismatch("Kaggle backup version contents do not match the uploaded checkpoint")
+            return BackupUpload(version, len(progress_videos), actual_fingerprint)
+        finally:
+            shutil.rmtree(destination, ignore_errors=True)
+
+    def _status_metadata(self, error_prefix: str) -> dict[str, Any]:
         status = self._runner(
-            ["kaggle", "datasets", "status", "-d", self.dataset],
+            ["kaggle", "datasets", "status", "-d", self.dataset, "--json"],
             check=False,
             capture_output=True,
             text=True,
         )
         if status.returncode != 0:
-            raise BackupError(f"Kaggle upload verification failed: {status.stderr.strip()}")
-        output = f"{upload.stdout}\n{status.stdout}"
-        match = re.search(r"(?:version|versionNumber|Version)\D+([0-9]+(?:\.[0-9]+)*)", output)
-        if not match:
-            raise BackupError("Kaggle upload succeeded but no backup version was reported")
-        return BackupUpload(match.group(1), completed_videos, fingerprint)
+            raise BackupError(f"{error_prefix}: {status.stderr.strip()}")
+        return self._parse_status(status.stdout)
+
+    @staticmethod
+    def _parse_status(output: str) -> dict[str, Any]:
+        try:
+            value = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise BackupError("Kaggle status returned malformed JSON") from exc
+        if not isinstance(value, dict):
+            raise BackupError("Kaggle status returned an invalid JSON object")
+        return value
+
+    @staticmethod
+    def _status_version(metadata: dict[str, Any]) -> str:
+        for key in ("versionNumber", "version", "datasetVersionNumber"):
+            value = metadata.get(key)
+            if isinstance(value, (int, str)) and str(value):
+                return str(value)
+        raise BackupError("Kaggle status did not identify a dataset version")
+
+    @staticmethod
+    def _status_private(metadata: dict[str, Any]) -> bool:
+        for key in ("private", "isPrivate"):
+            if key in metadata:
+                return metadata[key] is True
+        return False
 
     def restore_latest(self, output_dir: Path) -> None:
         destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-restore-"))
         try:
+            metadata = self._status_metadata("Kaggle restore verification failed")
+            if not self._status_private(metadata):
+                raise BackupError("Kaggle backup privacy could not be confirmed as private")
             result = self._runner(
                 ["kaggle", "datasets", "download", "-d", self.dataset, "-p", str(destination), "--unzip"],
                 check=False,
@@ -145,20 +252,56 @@ class KaggleBackupManager:
             if result.returncode != 0:
                 raise BackupError(f"Kaggle restore failed: {result.stderr.strip()}")
             roots = [path.parent for path in destination.rglob("manifest.csv")]
-            if not roots:
+            if len(roots) != 1:
                 raise BackupError("Restored Kaggle dataset has no manifest.csv")
             source = roots[0]
-            validate_checkpoint(source)
-            if output_dir.exists():
-                shutil.rmtree(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
+            manifest_count, fingerprint = validate_checkpoint(source)
+            manifest_videos = manifest_video_ids(source)
+            progress_videos = validate_progress(source, manifest_videos)
+            metadata_path = source / "dataset-metadata.json"
+            if not metadata_path.is_file():
+                raise BackupError("Restored backup is missing recorded metadata")
+            try:
+                recorded = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise BackupError("Restored backup metadata is malformed") from exc
+            if not isinstance(recorded, dict):
+                raise BackupError("Restored backup metadata is invalid")
+            checkpoint = recorded.get("checkpoint", {})
+            if not isinstance(checkpoint, dict):
+                raise BackupError("Restored backup metadata has no checkpoint record")
+            if checkpoint.get("completed_videos") != len(progress_videos) or checkpoint.get("fingerprint") != fingerprint:
+                raise BackupError("Restored backup fingerprint or completed-video count is invalid")
+            if manifest_count != len(progress_videos):
+                raise BackupError("Restored manifest and progress counts disagree")
+            output_dir.parent.mkdir(parents=True, exist_ok=True)
+            staged = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-restore-", dir=output_dir.parent))
             for path in _safe_files(source):
-                target = output_dir / path.relative_to(source)
+                target = staged / path.relative_to(source)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, target)
+            old = output_dir.with_name(f".{output_dir.name}-previous")
+            if old.exists():
+                shutil.rmtree(old)
+            if output_dir.exists():
+                os.replace(output_dir, old)
+            try:
+                os.replace(staged, output_dir)
+            except BaseException:
+                if old.exists() and not output_dir.exists():
+                    os.replace(old, output_dir)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
         finally:
             shutil.rmtree(destination, ignore_errors=True)
 
 
 def utc_checkpoint_time() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def manifest_video_ids(root: Path) -> set[str]:
+    import csv
+
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        return {str(row["video_id"]) for row in csv.DictReader(handle)}

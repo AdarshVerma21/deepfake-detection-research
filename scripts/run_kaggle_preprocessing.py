@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sampling-strategy", choices=["uniform", "random"], default="uniform")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--categories", nargs="+", choices=sorted(SUPPORTED_CATEGORIES), default=list(SUPPORTED_CATEGORIES))
+    parser.add_argument(
+        "--privacy-confirmed",
+        action="store_true",
+        help="Confirm in Kaggle that the backup dataset is private; CLI 2.0.2 cannot verify this.",
+    )
     parser.add_argument("--resume", action="store_true", help="Restore the latest verified Kaggle backup before continuing.")
     return parser
 
@@ -48,7 +53,7 @@ def main() -> None:
         sampling_strategy=args.sampling_strategy,
     )
     completed = KagglePreprocessingWorkflow(
-        config, KaggleBackupManager(args.kaggle_dataset)
+        config, KaggleBackupManager(args.kaggle_dataset, privacy_confirmed=args.privacy_confirmed)
     ).run(
         chunk_size=args.chunk_size,
         start_index=args.start_index,

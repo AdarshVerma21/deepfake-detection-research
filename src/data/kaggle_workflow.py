@@ -81,7 +81,7 @@ class KagglePreprocessingWorkflow:
             previous = after.get("last_verified_backup", {})
             if previous.get("fingerprint") == fingerprint and previous.get("completed_videos") == completed_count:
                 raise BackupError("Checkpoint is unchanged; refusing duplicate upload")
-            recovered = self.backup.verify_latest(completed_count, fingerprint)
+            recovered = self.backup.verify_latest(completed_count, fingerprint, progress_ids)
             if recovered is not None:
                 self._record_verified_backup(
                     progress_path, after, recovered.version, recovered.completed_videos, recovered.fingerprint
@@ -89,7 +89,7 @@ class KagglePreprocessingWorkflow:
                 continue
             package, _ = self.backup.create_package(self.config.output_dir, completed_count)
             try:
-                uploaded = self.backup.upload(package, completed_count, fingerprint)
+                uploaded = self.backup.upload(package, completed_count, fingerprint, progress_ids)
             finally:
                 import shutil
 

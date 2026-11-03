@@ -109,11 +109,13 @@ class KaggleBackupManager:
         self,
         dataset: str,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        privacy_confirmed: bool = False,
     ) -> None:
         if "/" not in dataset:
             raise ValueError("dataset must use owner/slug form")
         self.dataset = dataset
         self._runner = runner or subprocess.run
+        self.privacy_confirmed = privacy_confirmed
 
     def create_package(self, output_dir: Path, completed_videos: int) -> tuple[Path, str]:
         count, fingerprint = validate_checkpoint(output_dir)
@@ -140,7 +142,13 @@ class KaggleBackupManager:
         (package / "dataset-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         return package, fingerprint
 
-    def upload(self, package: Path, completed_videos: int, fingerprint: str) -> BackupUpload:
+    def upload(
+        self,
+        package: Path,
+        completed_videos: int,
+        fingerprint: str,
+        expected_video_ids: set[str] | None = None,
+    ) -> BackupUpload:
         if any("kaggle.json" in path.name.lower() or "credentials" in path.name.lower() for path in package.rglob("*")):
             raise BackupError("Refusing to upload credentials in checkpoint package")
         message = f"FaceForensics preprocessing checkpoint: {completed_videos} videos"
@@ -153,32 +161,53 @@ class KaggleBackupManager:
         if upload.returncode != 0:
             raise BackupError(f"Kaggle upload failed: {upload.stderr.strip()}")
         metadata = self._status_metadata("Kaggle upload verification failed")
-        version = self._status_version(metadata)
-        if not self._status_private(metadata):
-            raise BackupError("Kaggle backup privacy could not be confirmed as private")
-        verified = self._verify_version(version, completed_videos, fingerprint)
+        verified = self._verify_version(
+            self._status_version(metadata),
+            completed_videos,
+            fingerprint,
+            expected_video_ids,
+        )
+        self._require_manual_privacy_confirmation()
         return verified
 
-    def verify_latest(self, completed_videos: int, fingerprint: str) -> BackupUpload | None:
+    def verify_latest(
+        self,
+        completed_videos: int,
+        fingerprint: str,
+        expected_video_ids: set[str] | None = None,
+    ) -> BackupUpload | None:
         """Find a completed matching upload after an interruption."""
 
         metadata = self._status_metadata("Kaggle backup verification failed")
-        if not self._status_private(metadata):
-            raise BackupError("Kaggle backup privacy could not be confirmed as private")
-        version = self._status_version(metadata)
         try:
-            return self._verify_version(version, completed_videos, fingerprint)
+            verified = self._verify_version(
+                self._status_version(metadata),
+                completed_videos,
+                fingerprint,
+                expected_video_ids,
+            )
+            self._require_manual_privacy_confirmation()
+            return verified
         except _BackupMismatch:
             return None
 
-    def _verify_version(self, version: str, completed_videos: int, fingerprint: str) -> BackupUpload:
+    def _verify_version(
+        self,
+        version: str,
+        completed_videos: int,
+        fingerprint: str,
+        expected_video_ids: set[str] | None = None,
+    ) -> BackupUpload:
         destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-verify-"))
         try:
+            command = [
+                "kaggle", "datasets", "download", "-d", self.dataset,
+                "-p", str(destination), "--unzip",
+            ]
+            if version != "latest":
+                command.extend(["--dataset-version-number", version])
             result = self._runner(
-                [
-                    "kaggle", "datasets", "download", "-d", self.dataset,
-                    "-p", str(destination), "--unzip", "--dataset-version-number", version,
-                ],
+                command,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -195,6 +224,7 @@ class KaggleBackupManager:
                 manifest_count != completed_videos
                 or len(progress_videos) != completed_videos
                 or actual_fingerprint != fingerprint
+                or (expected_video_ids is not None and progress_videos != expected_video_ids)
             ):
                 raise _BackupMismatch("Kaggle backup version contents do not match the uploaded checkpoint")
             return BackupUpload(version, len(progress_videos), actual_fingerprint)
@@ -203,7 +233,7 @@ class KaggleBackupManager:
 
     def _status_metadata(self, error_prefix: str) -> dict[str, Any]:
         status = self._runner(
-            ["kaggle", "datasets", "status", "-d", self.dataset, "--json"],
+            ["kaggle", "datasets", "status", "-d", self.dataset],
             check=False,
             capture_output=True,
             text=True,
@@ -214,35 +244,28 @@ class KaggleBackupManager:
 
     @staticmethod
     def _parse_status(output: str) -> dict[str, Any]:
-        try:
-            value = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise BackupError("Kaggle status returned malformed JSON") from exc
-        if not isinstance(value, dict):
-            raise BackupError("Kaggle status returned an invalid JSON object")
-        return value
+        if output.strip().lower() == "ready":
+            return {"status": "ready"}
+        raise BackupError("Kaggle status did not return the expected plain-text ready state")
 
     @staticmethod
     def _status_version(metadata: dict[str, Any]) -> str:
-        for key in ("versionNumber", "version", "datasetVersionNumber"):
-            value = metadata.get(key)
-            if isinstance(value, (int, str)) and str(value):
-                return str(value)
-        raise BackupError("Kaggle status did not identify a dataset version")
+        if metadata.get("status") == "ready":
+            return "latest"
+        raise BackupError("Kaggle status did not identify a ready dataset")
 
-    @staticmethod
-    def _status_private(metadata: dict[str, Any]) -> bool:
-        for key in ("private", "isPrivate"):
-            if key in metadata:
-                return metadata[key] is True
-        return False
+    def _require_manual_privacy_confirmation(self) -> None:
+        if not self.privacy_confirmed:
+            raise BackupError(
+                "Kaggle CLI 2.0.2 does not provide an authoritative privacy check; "
+                "confirm the dataset is private in Kaggle, then retry with privacy_confirmed=True"
+            )
 
     def restore_latest(self, output_dir: Path) -> None:
         destination = Path(tempfile.mkdtemp(prefix="faceforensics-kaggle-restore-"))
         try:
             metadata = self._status_metadata("Kaggle restore verification failed")
-            if not self._status_private(metadata):
-                raise BackupError("Kaggle backup privacy could not be confirmed as private")
+            self._require_manual_privacy_confirmation()
             result = self._runner(
                 ["kaggle", "datasets", "download", "-d", self.dataset, "-p", str(destination), "--unzip"],
                 check=False,

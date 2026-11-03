@@ -68,18 +68,21 @@ def test_package_excludes_credentials_and_upload_verifies_status(tmp_path: Path)
             destination = Path(command[command.index("-p") + 1])
             shutil.copytree(package_holder["package"], destination, dirs_exist_ok=True)
             return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-        output = json.dumps({"versionNumber": 7, "private": True})
+        output = "ready\n" if command[2] == "status" else ""
         return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
 
-    manager = KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner)
+    manager = KaggleBackupManager(
+        "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
+    )
     package, fingerprint = manager.create_package(tmp_path, 2)
     package_holder["package"] = package
     assert not (package / "kaggle.json").exists()
     uploaded = manager.upload(package, 2, fingerprint)
-    assert uploaded.version == "7"
+    assert uploaded.version == "latest"
     assert calls[0][:4] == ["kaggle", "datasets", "version", "-p"]
     assert calls[1][:4] == ["kaggle", "datasets", "status", "-d"]
-    assert calls[1][-1] == "--json"
+    assert "--json" not in calls[1]
+    assert "--dataset-version-number" not in calls[2]
 
 
 def test_zero_crop_video_cannot_be_counted_as_completed(tmp_path: Path) -> None:
@@ -110,7 +113,7 @@ def test_malformed_cli_version_output_fails_safely(tmp_path: Path) -> None:
 
     manager = KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner)
     package, fingerprint = manager.create_package(tmp_path, 1)
-    with pytest.raises(BackupError, match="malformed JSON"):
+    with pytest.raises(BackupError, match="plain-text ready"):
         manager.upload(package, 1, fingerprint)
 
 
@@ -118,13 +121,17 @@ def test_privacy_verification_failure_fails_safely(tmp_path: Path) -> None:
     _checkpoint(tmp_path, 1)
 
     def runner(command, **kwargs):
+        if command[2] == "download":
+            destination = Path(command[command.index("-p") + 1])
+            shutil.copytree(tmp_path, destination, dirs_exist_ok=True)
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return type(
-            "Result", (), {"returncode": 0, "stdout": json.dumps({"versionNumber": 1, "private": False}), "stderr": ""}
+            "Result", (), {"returncode": 0, "stdout": "ready\n", "stderr": ""}
         )()
 
     manager = KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner)
     package, fingerprint = manager.create_package(tmp_path, 1)
-    with pytest.raises(BackupError, match="private"):
+    with pytest.raises(BackupError, match="privacy"):
         manager.upload(package, 1, fingerprint)
 
 
@@ -136,17 +143,19 @@ def test_interrupted_upload_can_be_verified_without_duplicate(tmp_path: Path) ->
         calls.append(command)
         if command[2] == "status":
             return type(
-                "Result", (), {"returncode": 0, "stdout": json.dumps({"versionNumber": 4, "private": True}), "stderr": ""}
+                "Result", (), {"returncode": 0, "stdout": "ready\n", "stderr": ""}
             )()
         destination = Path(command[command.index("-p") + 1])
         shutil.copytree(tmp_path, destination, dirs_exist_ok=True)
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    manager = KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner)
+    manager = KaggleBackupManager(
+        "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
+    )
     count, fingerprint = validate_checkpoint(tmp_path)
-    recovered = manager.verify_latest(count, fingerprint)
+    recovered = manager.verify_latest(count, fingerprint, {"000"})
     assert recovered is not None
-    assert recovered.version == "4"
+    assert recovered.version == "latest"
     assert not any(command[2] == "version" for command in calls)
 
 
@@ -165,13 +174,15 @@ def test_restore_validates_and_replaces_output_atomically(tmp_path: Path) -> Non
     def runner(command, **kwargs):
         if command[2] == "status":
             return type(
-                "Result", (), {"returncode": 0, "stdout": json.dumps({"versionNumber": 1, "private": True}), "stderr": ""}
+                "Result", (), {"returncode": 0, "stdout": "ready\n", "stderr": ""}
             )()
         destination = Path(command[command.index("-p") + 1])
         shutil.copytree(source, destination, dirs_exist_ok=True)
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    KaggleBackupManager("adarshverma21/private-checkpoints", runner=runner).restore_latest(output)
+    KaggleBackupManager(
+        "adarshverma21/private-checkpoints", runner=runner, privacy_confirmed=True
+    ).restore_latest(output)
     assert not (output / "stale.txt").exists()
     assert (output / "manifest.csv").is_file()
 

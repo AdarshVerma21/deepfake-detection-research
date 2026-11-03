@@ -22,6 +22,7 @@ if __name__ == "__main__":
                 "tests/test_reproducibility.py",
                 "tests/test_models_training.py",
                 "tests/test_gradcam.py",
+                "tests/test_stage6_training.py",
             ],
             check=False,
         ).returncode

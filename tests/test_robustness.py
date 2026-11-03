@@ -41,6 +41,7 @@ def test_robustness_metrics_include_required_outputs() -> None:
     assert result["recall"] == 1.0
     assert result["f1"] == 1.0
     assert result["roc_auc"] == 1.0
+    assert result["pr_auc"] == 1.0
     assert result["confusion_matrix"] == [[2, 0], [0, 2]]
 
 

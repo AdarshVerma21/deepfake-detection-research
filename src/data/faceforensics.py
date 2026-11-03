@@ -11,7 +11,9 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import random
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
@@ -105,6 +107,28 @@ class PipelineReport:
     samples_written: int
     failures: int
     warnings: int
+
+
+@dataclass
+class ProgressState:
+    """Durable state for resumable video processing."""
+
+    completed_video_ids: set[str]
+    failed_videos: dict[str, str]
+    configuration: dict[str, Any]
+
+    @property
+    def completed_videos(self) -> int:
+        return len(self.completed_video_ids)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "completed_video_ids": sorted(self.completed_video_ids),
+            "failed_video_ids": sorted(self.failed_videos),
+            "failed_videos": dict(sorted(self.failed_videos.items())),
+            "configuration": self.configuration,
+            "completed_videos": self.completed_videos,
+        }
 
 
 class HaarCascadeFaceDetector:
@@ -281,7 +305,15 @@ class FaceForensicsPipeline:
         self._warnings = 0
         self._failures = 0
 
-    def run(self, limit_videos: int | None = None) -> PipelineReport:
+    def run(
+        self,
+        limit_videos: int | None = None,
+        batch_size: int = 100,
+        resume: bool = False,
+        progress_file: str | Path | None = None,
+    ) -> PipelineReport:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         validate_dataset_root(self.config.dataset_root, self.config.categories)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         records = discover_videos(self.config.dataset_root, self.config.categories, self.logger)
@@ -289,75 +321,68 @@ class FaceForensicsPipeline:
             records = records[: max(0, limit_videos)]
         assignments = load_split_assignments(self.config.split_dir, self.logger)
         manifest_path = self.config.output_dir / "manifest.csv"
-        crop_root = self.config.output_dir / "face_crops"
-        rows: list[dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
-        processed = 0
-        for record in records:
-            try:
-                metadata = extract_video_metadata(record.path)
-                indices = sample_frame_indices(
-                    int(metadata["frame_count"]),
-                    self.config.frames_per_video,
-                    self.config.seed,
-                    record.video_id,
-                    self.config.sampling_strategy,
-                )
-                capture = cv2.VideoCapture(str(record.path))
+        progress_path = Path(progress_file) if progress_file else self.config.output_dir / "progress.json"
+        configuration = self._configuration(batch_size)
+        progress = self._load_progress(progress_path, configuration) if resume else ProgressState(set(), {}, configuration)
+        rows = self._load_manifest(manifest_path) if resume and manifest_path.is_file() else []
+        self._write_progress_atomic(progress_path, progress)
+        pending = [record for record in records if record.video_id not in progress.completed_video_ids]
+        total_batches = (len(pending) + batch_size - 1) // batch_size
+        processed = len(progress.completed_video_ids)
+        for batch_number, start in enumerate(range(0, len(pending), batch_size), start=1):
+            batch = pending[start : start + batch_size]
+            self.logger.info(
+                "Batch %s/%s starting: %s videos, completed=%s, failures=%s, remaining=%s",
+                batch_number,
+                total_batches,
+                len(batch),
+                processed,
+                len(progress.failed_videos),
+                len(pending) - start,
+            )
+            for record in batch:
                 try:
-                    wrote_for_video = False
-                    for frame_index in indices:
-                        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-                        ok, frame = capture.read()
-                        if not ok or frame is None or frame.size == 0:
-                            self._warn("Empty or unreadable frame %s in %s", frame_index, record.path)
-                            continue
-                        boxes = [box for box in self.detector.detect(frame) if _valid_crop(frame, box) is not None]
-                        if not boxes:
-                            self._warn("No valid face detected at frame %s in %s", frame_index, record.path)
-                            continue
-                        box = max(boxes, key=lambda item: int(item[2]) * int(item[3]))
-                        crop = _valid_crop(frame, box)
-                        if crop is None:
-                            self._warn("Invalid face bounding box at frame %s in %s", frame_index, record.path)
-                            continue
-                        key = (str(record.path), frame_index)
-                        if key in seen:
-                            self._warn("Duplicate sample skipped: %s frame %s", record.path, frame_index)
-                            continue
-                        seen.add(key)
-                        relative_path = Path("face_crops") / record.manipulation_type / record.video_id / f"{frame_index:06d}.jpg"
-                        destination = self.config.output_dir / relative_path
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        if not cv2.imwrite(str(destination), cv2.cvtColor(preprocess_face(crop, self.config.crop_size), cv2.COLOR_RGB2BGR)):
-                            raise OSError(f"Could not write face crop: {destination}")
-                        rows.append(
-                            {
-                                "video_id": record.video_id,
-                                "source_video_id": record.source_video_id,
-                                "manipulation_type": record.manipulation_type,
-                                "label": record.label,
-                                "split": assignments.get(record.video_id, assignments.get(record.source_video_id, "")),
-                                "frame_path": str(relative_path),
-                                "frame_index": frame_index,
-                                "original_video_path": str(record.path),
-                                **metadata,
-                            }
-                        )
-                        wrote_for_video = True
-                    processed += int(wrote_for_video)
-                finally:
-                    capture.release()
-            except (OSError, ValueError, cv2.error) as exc:
-                self._failure("Failed to process %s: %s", record.path, exc)
-        self._write_manifest(manifest_path, rows)
-        statistics_path = self._write_statistics(rows, len(records), processed)
+                    video_rows, generated = self._process_video(record, assignments)
+                    rows = [
+                        row for row in rows
+                        if (row["manipulation_type"], row["video_id"]) != (record.manipulation_type, record.video_id)
+                    ]
+                    rows.extend(video_rows)
+                    self._write_manifest_atomic(manifest_path, rows)
+                    progress.completed_video_ids.add(record.video_id)
+                    progress.failed_videos.pop(record.video_id, None)
+                    self._write_progress_atomic(progress_path, progress)
+                    processed += 1
+                    self.logger.info(
+                        "Completed video %s: generated_crops=%s, completed=%s, failures=%s, remaining=%s",
+                        record.video_id,
+                        generated,
+                        processed,
+                        len(progress.failed_videos),
+                        len(records) - len(progress.completed_video_ids),
+                    )
+                except (OSError, ValueError, RuntimeError, cv2.error) as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                    progress.failed_videos[record.video_id] = reason
+                    self._failure("Failed to process %s: %s", record.path, reason)
+                    self._write_progress_atomic(progress_path, progress)
+            self.logger.info(
+                "Batch %s/%s finished: completed=%s, failures=%s, remaining=%s",
+                batch_number,
+                total_batches,
+                len(progress.completed_video_ids),
+                len(progress.failed_videos),
+                len(records) - len(progress.completed_video_ids),
+            )
+        final_rows = self._load_manifest(manifest_path) if manifest_path.is_file() else []
+        videos_with_samples = len({str(row["video_id"]) for row in final_rows})
+        statistics_path = self._write_statistics(final_rows, len(records), videos_with_samples)
         return PipelineReport(
             manifest_path=manifest_path,
             statistics_path=statistics_path,
             videos_discovered=len(records),
-            videos_processed=processed,
-            samples_written=len(rows),
+            videos_processed=videos_with_samples,
+            samples_written=len(final_rows),
             failures=self._failures,
             warnings=self._warnings,
         )
@@ -370,12 +395,131 @@ class FaceForensicsPipeline:
         self._failures += 1
         self.logger.error(message, *args)
 
+    def _process_video(
+        self,
+        record: VideoRecord,
+        assignments: Mapping[str, str],
+    ) -> tuple[list[dict[str, Any]], int]:
+        metadata = extract_video_metadata(record.path)
+        indices = sample_frame_indices(
+            int(metadata["frame_count"]),
+            self.config.frames_per_video,
+            self.config.seed,
+            record.video_id,
+            self.config.sampling_strategy,
+        )
+        rows: list[dict[str, Any]] = []
+        capture = cv2.VideoCapture(str(record.path))
+        try:
+            for frame_index in indices:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = capture.read()
+                if not ok or frame is None or frame.size == 0:
+                    self._warn("Empty or unreadable frame %s in %s", frame_index, record.path)
+                    continue
+                boxes = [box for box in self.detector.detect(frame) if _valid_crop(frame, box) is not None]
+                if not boxes:
+                    self._warn("No valid face detected at frame %s in %s", frame_index, record.path)
+                    continue
+                crop = _valid_crop(frame, max(boxes, key=lambda item: int(item[2]) * int(item[3])))
+                if crop is None:
+                    self._warn("Invalid face bounding box at frame %s in %s", frame_index, record.path)
+                    continue
+                relative_path = Path("face_crops") / record.manipulation_type / record.video_id / f"{frame_index:06d}.jpg"
+                destination = self.config.output_dir / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = tempfile.NamedTemporaryFile(
+                    dir=destination.parent, prefix=f".{destination.stem}.", suffix=".jpg", delete=False
+                )
+                temporary.close()
+                try:
+                    if not cv2.imwrite(
+                        temporary.name,
+                        cv2.cvtColor(preprocess_face(crop, self.config.crop_size), cv2.COLOR_RGB2BGR),
+                    ):
+                        raise OSError(f"Could not write face crop: {destination}")
+                    os.replace(temporary.name, destination)
+                finally:
+                    if os.path.exists(temporary.name):
+                        os.unlink(temporary.name)
+                rows.append(
+                    {
+                        "video_id": record.video_id,
+                        "source_video_id": record.source_video_id,
+                        "manipulation_type": record.manipulation_type,
+                        "label": record.label,
+                        "split": assignments.get(record.video_id, assignments.get(record.source_video_id, "")),
+                        "frame_path": str(relative_path),
+                        "frame_index": frame_index,
+                        "original_video_path": str(record.path),
+                        **metadata,
+                    }
+                )
+        finally:
+            capture.release()
+        return rows, len(rows)
+
     @staticmethod
-    def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
+    def _load_manifest(path: Path) -> list[dict[str, Any]]:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+
+    def _configuration(self, batch_size: int) -> dict[str, Any]:
+        return {
+            "dataset_root": str(self.config.dataset_root),
+            "output_dir": str(self.config.output_dir),
+            "frames_per_video": self.config.frames_per_video,
+            "crop_size": self.config.crop_size,
+            "detector": self.config.detector,
+            "detector_config": self.config.detector_config,
+            "seed": self.config.seed,
+            "categories": list(self.config.categories),
+            "split_dir": str(self.config.split_dir) if self.config.split_dir else None,
+            "sampling_strategy": self.config.sampling_strategy,
+            "batch_size": batch_size,
+        }
+
+    @staticmethod
+    def _load_progress(path: Path, configuration: dict[str, Any]) -> ProgressState:
+        if not path.is_file():
+            return ProgressState(set(), {}, configuration)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Unable to read progress file {path}: {exc}") from exc
+        if data.get("configuration") != configuration:
+            raise ValueError(f"Progress configuration does not match the current run: {path}")
+        return ProgressState(
+            set(data.get("completed_video_ids", [])),
+            dict(data.get("failed_videos", {})),
+            configuration,
+        )
+
+    @staticmethod
+    def _write_manifest_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+        temporary = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False)
+        temporary.close()
+        try:
+            with open(temporary.name, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(temporary.name, path)
+        finally:
+            if os.path.exists(temporary.name):
+                os.unlink(temporary.name)
+
+    @staticmethod
+    def _write_progress_atomic(path: Path, progress: ProgressState) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False)
+        temporary.close()
+        try:
+            Path(temporary.name).write_text(json.dumps(progress.as_dict(), indent=2), encoding="utf-8")
+            os.replace(temporary.name, path)
+        finally:
+            if os.path.exists(temporary.name):
+                os.unlink(temporary.name)
 
     def _write_statistics(self, rows: list[dict[str, Any]], discovered: int, processed: int) -> Path:
         stats = {

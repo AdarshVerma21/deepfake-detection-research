@@ -25,6 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--categories", nargs="+", choices=sorted(SUPPORTED_CATEGORIES), default=list(SUPPORTED_CATEGORIES))
     parser.add_argument("--pilot", action="store_true", help="Process at most 10 videos and 5 frames per video.")
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--resume", action="store_true", help="Resume from the progress file and skip completed videos.")
+    parser.add_argument("--progress-file", type=Path, help="Path to the resumable progress JSON file.")
     return parser
 
 
@@ -43,7 +46,12 @@ def main() -> None:
         categories=tuple(args.categories),
         sampling_strategy=args.sampling_strategy,
     )
-    report = FaceForensicsPipeline(config).run(limit_videos=10 if args.pilot else None)
+    report = FaceForensicsPipeline(config).run(
+        limit_videos=10 if args.pilot else None,
+        batch_size=args.batch_size,
+        resume=args.resume,
+        progress_file=args.progress_file,
+    )
     split_report = prepare_split_manifests(report.manifest_path, args.output_dir)
     print(f"Manifest: {report.manifest_path}")
     print(f"Statistics: {report.statistics_path}")

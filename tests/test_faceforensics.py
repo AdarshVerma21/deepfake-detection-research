@@ -95,3 +95,89 @@ def test_pipeline_uses_mocked_capture_and_detector(tmp_path: Path, monkeypatch) 
     assert rows[0].startswith("video_id,source_video_id,manipulation_type")
     assert len(rows) == 3
     assert cv2.imread(str(output / "face_crops/original/000/000000.jpg")).shape[:2] == (16, 16)
+
+
+def test_pipeline_batches_and_persists_progress(tmp_path: Path, monkeypatch) -> None:
+    root = _fixture_root(tmp_path)
+    (root / "original_sequences/youtube/c23/001.mp4").touch()
+    (root / "original_sequences/youtube/c23/002.mp4").touch()
+    output = tmp_path / "output"
+    frame = np.full((32, 48, 3), 127, dtype=np.uint8)
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, property_id: int) -> float:
+            return {cv2.CAP_PROP_FRAME_COUNT: 1, cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_WIDTH: 48,
+                    cv2.CAP_PROP_FRAME_HEIGHT: 32}.get(property_id, 0)
+
+        def set(self, property_id: int, value: int) -> bool:
+            return True
+
+        def read(self):
+            return True, frame.copy()
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr("src.data.faceforensics.cv2.VideoCapture", FakeCapture)
+    detector = type("Detector", (), {"detect": lambda self, image: [(4, 4, 20, 20)]})()
+    config = FaceForensicsPipelineConfig(dataset_root=root, output_dir=output, categories=("original",), frames_per_video=1)
+    report = FaceForensicsPipeline(config, face_detector=detector).run(batch_size=1)
+    progress = json.loads((output / "progress.json").read_text(encoding="utf-8"))
+    assert report.videos_processed == 3
+    assert progress["completed_videos"] == 3
+    assert progress["failed_videos"] == {}
+
+
+def test_pipeline_resumes_skips_completed_and_retries_failed_without_duplicates(tmp_path: Path, monkeypatch) -> None:
+    root = _fixture_root(tmp_path)
+    output = tmp_path / "output"
+    frame = np.full((32, 48, 3), 127, dtype=np.uint8)
+    calls: list[str] = []
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, property_id: int) -> float:
+            return {cv2.CAP_PROP_FRAME_COUNT: 1, cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_WIDTH: 48,
+                    cv2.CAP_PROP_FRAME_HEIGHT: 32}.get(property_id, 0)
+
+        def set(self, property_id: int, value: int) -> bool:
+            return True
+
+        def read(self):
+            return True, frame.copy()
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr("src.data.faceforensics.cv2.VideoCapture", FakeCapture)
+
+    class FlakyDetector:
+        def detect(self, image):
+            calls.append("detect")
+            if len(calls) == 1:
+                raise RuntimeError("simulated interruption")
+            return [(4, 4, 20, 20)]
+
+    config = FaceForensicsPipelineConfig(dataset_root=root, output_dir=output, categories=("original",), frames_per_video=1)
+    first = FaceForensicsPipeline(config, face_detector=FlakyDetector()).run(batch_size=1)
+    assert first.failures == 1
+    second = FaceForensicsPipeline(config, face_detector=FlakyDetector()).run(batch_size=1, resume=True)
+    assert second.failures == 0
+    with (output / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(__import__("csv").DictReader(handle))
+    assert len(rows) == 1
+    assert len({(row["video_id"], row["frame_index"]) for row in rows}) == 1
+    progress = json.loads((output / "progress.json").read_text(encoding="utf-8"))
+    assert progress["completed_videos"] == 1
+    assert progress["failed_videos"] == {}

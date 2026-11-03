@@ -325,6 +325,16 @@ class FaceForensicsPipeline:
         configuration = self._configuration(batch_size)
         progress = self._load_progress(progress_path, configuration) if resume else ProgressState(set(), {}, configuration)
         rows = self._load_manifest(manifest_path) if resume and manifest_path.is_file() else []
+        rows = self._deduplicate_manifest(rows)
+        if resume:
+            confirmed = {
+                record.video_id
+                for record in records
+                if record.video_id not in progress.failed_videos
+                if self._video_outputs_are_complete(record, rows)
+            }
+            progress.completed_video_ids.intersection_update(confirmed)
+            progress.completed_video_ids.update(confirmed)
         self._write_progress_atomic(progress_path, progress)
         pending = [record for record in records if record.video_id not in progress.completed_video_ids]
         total_batches = (len(pending) + batch_size - 1) // batch_size
@@ -340,32 +350,43 @@ class FaceForensicsPipeline:
                 len(progress.failed_videos),
                 len(pending) - start,
             )
+            batch_rows: list[dict[str, Any]] = []
+            batch_completed: set[str] = set()
             for record in batch:
                 try:
-                    video_rows, generated = self._process_video(record, assignments)
-                    rows = [
-                        row for row in rows
-                        if (row["manipulation_type"], row["video_id"]) != (record.manipulation_type, record.video_id)
-                    ]
-                    rows.extend(video_rows)
-                    self._write_manifest_atomic(manifest_path, rows)
-                    progress.completed_video_ids.add(record.video_id)
+                    video_rows, _ = self._process_video(record, assignments)
+                    if not video_rows:
+                        raise ValueError("No face crops were generated")
+                    batch_rows.extend(video_rows)
+                    batch_completed.add(record.video_id)
                     progress.failed_videos.pop(record.video_id, None)
-                    self._write_progress_atomic(progress_path, progress)
-                    processed += 1
-                    self.logger.info(
-                        "Completed video %s: generated_crops=%s, completed=%s, failures=%s, remaining=%s",
-                        record.video_id,
-                        generated,
-                        processed,
-                        len(progress.failed_videos),
-                        len(records) - len(progress.completed_video_ids),
-                    )
                 except (OSError, ValueError, RuntimeError, cv2.error) as exc:
                     reason = f"{type(exc).__name__}: {exc}"
                     progress.failed_videos[record.video_id] = reason
                     self._failure("Failed to process %s: %s", record.path, reason)
-                    self._write_progress_atomic(progress_path, progress)
+            if batch_rows:
+                batch_ids = {row["video_id"] for row in batch_rows}
+                rows = [
+                    row for row in rows
+                    if row["video_id"] not in batch_ids
+                ]
+                rows = self._deduplicate_manifest(rows + batch_rows)
+                self._write_manifest_atomic(manifest_path, rows)
+                progress.completed_video_ids.update(batch_completed)
+                self._write_progress_atomic(progress_path, progress)
+                processed = len(progress.completed_video_ids)
+            else:
+                self._write_progress_atomic(progress_path, progress)
+            for video_id in batch_completed:
+                generated = sum(row["video_id"] == video_id for row in batch_rows)
+                self.logger.info(
+                    "Completed video %s: generated_crops=%s, completed=%s, failures=%s, remaining=%s",
+                    video_id,
+                    generated,
+                    processed,
+                    len(progress.failed_videos),
+                    len(records) - len(progress.completed_video_ids),
+                )
             self.logger.info(
                 "Batch %s/%s finished: completed=%s, failures=%s, remaining=%s",
                 batch_number,
@@ -374,7 +395,7 @@ class FaceForensicsPipeline:
                 len(progress.failed_videos),
                 len(records) - len(progress.completed_video_ids),
             )
-        final_rows = self._load_manifest(manifest_path) if manifest_path.is_file() else []
+        final_rows = self._deduplicate_manifest(self._load_manifest(manifest_path)) if manifest_path.is_file() else []
         videos_with_samples = len({str(row["video_id"]) for row in final_rows})
         statistics_path = self._write_statistics(final_rows, len(records), videos_with_samples)
         return PipelineReport(
@@ -464,6 +485,30 @@ class FaceForensicsPipeline:
         with path.open("r", newline="", encoding="utf-8") as handle:
             return list(csv.DictReader(handle))
 
+    @staticmethod
+    def _deduplicate_manifest(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                str(row["manipulation_type"]),
+                str(row["video_id"]),
+                str(row["frame_index"]),
+                str(row["frame_path"]),
+            )
+            unique[key] = row
+        return list(unique.values())
+
+    def _video_outputs_are_complete(self, record: VideoRecord, rows: Iterable[dict[str, Any]]) -> bool:
+        video_rows = [
+            row for row in rows
+            if row.get("video_id") == record.video_id
+            and row.get("manipulation_type") == record.manipulation_type
+        ]
+        return bool(video_rows) and all(
+            (self.config.output_dir / str(row["frame_path"])).is_file()
+            for row in video_rows
+        )
+
     def _configuration(self, batch_size: int) -> dict[str, Any]:
         return {
             "dataset_root": str(self.config.dataset_root),
@@ -479,19 +524,27 @@ class FaceForensicsPipeline:
             "batch_size": batch_size,
         }
 
-    @staticmethod
-    def _load_progress(path: Path, configuration: dict[str, Any]) -> ProgressState:
+    def _load_progress(self, path: Path, configuration: dict[str, Any]) -> ProgressState:
         if not path.is_file():
             return ProgressState(set(), {}, configuration)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Unable to read progress file {path}: {exc}") from exc
+            self._warn("Ignoring unreadable progress file %s: %s", path, exc)
+            return ProgressState(set(), {}, configuration)
+        if not isinstance(data, dict) or "configuration" not in data:
+            self._warn("Ignoring malformed progress file %s", path)
+            return ProgressState(set(), {}, configuration)
         if data.get("configuration") != configuration:
             raise ValueError(f"Progress configuration does not match the current run: {path}")
+        completed = data.get("completed_video_ids", [])
+        failed = data.get("failed_videos", {})
+        if not isinstance(completed, list) or not isinstance(failed, dict):
+            self._warn("Ignoring malformed progress file %s", path)
+            return ProgressState(set(), {}, configuration)
         return ProgressState(
-            set(data.get("completed_video_ids", [])),
-            dict(data.get("failed_videos", {})),
+            set(str(video_id) for video_id in completed),
+            {str(video_id): str(reason) for video_id, reason in failed.items()},
             configuration,
         )
 
@@ -504,6 +557,8 @@ class FaceForensicsPipeline:
                 writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
                 writer.writeheader()
                 writer.writerows(rows)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary.name, path)
         finally:
             if os.path.exists(temporary.name):
@@ -515,7 +570,10 @@ class FaceForensicsPipeline:
         temporary = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False)
         temporary.close()
         try:
-            Path(temporary.name).write_text(json.dumps(progress.as_dict(), indent=2), encoding="utf-8")
+            with open(temporary.name, "w", encoding="utf-8") as handle:
+                json.dump(progress.as_dict(), handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary.name, path)
         finally:
             if os.path.exists(temporary.name):

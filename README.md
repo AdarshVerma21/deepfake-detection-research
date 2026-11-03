@@ -156,9 +156,16 @@ python scripts/prepare_faceforensics.py \
   --batch-size 100
 ```
 
+`/kaggle/input` is read-only and `/kaggle/working` is temporary. Keep the
+dataset and split files under `/kaggle/input`; write crops, manifests, and
+progress under `/kaggle/working`, or restore those outputs from a saved Kaggle
+dataset before resuming. The manifest is checkpointed once per batch. A batch
+interrupted before its checkpoint is safely reprocessed, and completed IDs are
+recorded only after the batch manifest replacement succeeds.
+
 If the Kaggle session stops, rerun the same command with `--resume`. Completed
-video IDs are skipped, failed videos are retried, and the manifest and progress
-file are updated after each successful video:
+videos with every manifest crop present are skipped, failed videos are retried,
+and missing/corrupt progress is rebuilt from the manifest and crop files:
 
 ```bash
 python scripts/prepare_faceforensics.py \
@@ -171,11 +178,27 @@ python scripts/prepare_faceforensics.py \
   --progress-file /kaggle/working/data/processed/faceforensics_c23/progress.json
 ```
 
-Keep `/kaggle/working/data/processed/faceforensics_c23/` in the same Kaggle
-session or save it as a dataset between sessions so that `progress.json`,
-`manifest.csv`, and the generated `face_crops/` remain available. Once all
-batches finish, the command writes the final `train.csv`, `val.csv`, `test.csv`,
-and `statistics.json` from the final manifest.
+The output and progress locations are independent. For example, keep a
+progress file in a restored working directory while writing a new output
+directory:
+
+```bash
+python scripts/prepare_faceforensics.py \
+  --dataset-root /kaggle/input/faceforensics \
+  --split-dir /kaggle/input/faceforensics/splits \
+  --output-dir /kaggle/working/ff-crops \
+  --progress-file /kaggle/working/ff-state/progress.json \
+  --frames-per-video 10 \
+  --batch-size 100 \
+  --resume
+```
+
+Do not delete `manifest.csv` or `face_crops/` before resuming: progress alone
+does not prove that outputs are complete. If a progress file is missing or
+corrupt, `--resume` safely rechecks the manifest and crop files. A configuration
+mismatch is rejected; rerun with the original preprocessing settings or start
+a new output/progress pair. Once all batches finish, the command writes the
+final `train.csv`, `val.csv`, `test.csv`, and `statistics.json`.
 
 ### Kaggle NVIDIA T4
 
